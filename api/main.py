@@ -22,6 +22,7 @@ from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 
+from parse_chandra_output import parse_chandra_html_to_json_string
 
 def JSONResponse(content, **kwargs):
     return Response(
@@ -249,12 +250,13 @@ async def _run_ocr_stream(job_id: str, file_filename: str, pages_to_process: lis
             text = await loop.run_in_executor(
                 thread_pool, ocr_page_sync, image_b64, prompt, cancel_event, request_id
             )
+            logger.info("[page=%d raw response]\n%s", i, text)
             page_result = {
                 "file_path":  file_filename,
                 "filename":   filename_stem,
                 "page_idx":   i,
                 "image_path": f"{filename_stem}_page_{i:04d}.png",
-                "response":   text,
+                "response":   parse_chandra_html_to_json_string(text),
             }
             await _page_save(job_id, i, page_result)
             await _job_incr(job_id, "ocr_success_pages")

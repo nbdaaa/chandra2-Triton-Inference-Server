@@ -14,18 +14,13 @@ def _to_str(x):
     return str(x)
 
 
-# ─── System prompt của Chandra 2 ──────────────────────────────────────────────
-# Chandra 2 dựa trên Qwen3-VL và được fine-tune cho OCR layout.
-# Model expect một system prompt ngắn, không cần JSON schema phức tạp như dots.ocr
-# vì Chandra tự output Markdown/HTML/JSON layout theo chuẩn riêng.
+# System prompt của Chandra 2 (Qwen3.5-VL base)
 SYSTEM_PROMPT = (
     "You are an expert document OCR and layout analysis system. "
     "Convert the document image to structured output, preserving the original "
     "layout and text content accurately."
 )
 
-# User prompt mặc định cho task OCR layout — tương đương prompt_type="ocr_layout"
-# trong thư viện chandra-ocr chính thức.
 DEFAULT_USER_PROMPT = (
     "Convert this document image to markdown. "
     "Preserve the layout, tables, math equations, and all text content exactly as it appears."
@@ -37,22 +32,6 @@ class TritonPythonModel:
         model_config = json.loads(args["model_config"])
         params = model_config.get("parameters", {})
 
-        self.engine_model_name = params.get("engine_model_name", {}).get(
-            "string_value", "chandra_ocr"
-        )
-
-        # Chandra dùng OpenAI-compatible /v1/chat/completions endpoint.
-        # Pipeline gọi endpoint này thay vì /v2/models/.../generate_stream như dots.ocr.
-        triton_http_port = os.environ.get("TRITON_HTTP_PORT")
-        if triton_http_port:
-            base_url = f"http://127.0.0.1:{triton_http_port}"
-        else:
-            base_url = params.get("triton_http_url", {}).get(
-                "string_value", "http://127.0.0.1:8000"
-            )
-
-        # vLLM expose /v1/chat/completions tại cùng port với Triton HTTP
-        self.chat_completions_url = f"{base_url}/v1/chat/completions"
         self.model_name = params.get("vllm_model_name", {}).get(
             "string_value", "chandra_ocr"
         )
@@ -60,20 +39,21 @@ class TritonPythonModel:
             params.get("max_tokens", {}).get("string_value", "12384")
         )
 
+        # URL của vLLM container — ưu tiên env var VLLM_PORT, fallback sang
+        # triton_http_url param trong config.pbtxt (được set bởi entrypoint.sh)
+        vllm_port = os.environ.get("VLLM_PORT", "8010")
+        param_url = params.get("triton_http_url", {}).get(
+            "string_value", f"http://127.0.0.1:{vllm_port}"
+        )
+        self.chat_completions_url = f"{param_url}/v1/chat/completions"
+
         redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
         self._redis = redis.Redis.from_url(redis_url, decode_responses=True)
 
     def _call_engine(self, image_b64: str, user_prompt: str, request_id: str = "") -> str:
         """
-        Gọi vLLM qua OpenAI-compatible /v1/chat/completions với streaming.
-
-        Chandra 2 (Qwen3-VL base) dùng chat template chuẩn:
-          <|im_start|>system\\n{system}<|im_end|>
-          <|im_start|>user\\n<|vision_start|><|image_pad|><|vision_end|>{text}<|im_end|>
-          <|im_start|>assistant\\n
-
-        vLLM tự apply chat template từ tokenizer_config.json — pipeline
-        chỉ cần gửi messages list theo OpenAI format với image_url.
+        Gọi vLLM container qua OpenAI /v1/chat/completions với SSE streaming.
+        vLLM tự apply Qwen3.5 chat template — không cần build raw prompt thủ công.
         """
         payload = {
             "model": self.model_name,
@@ -85,7 +65,6 @@ class TritonPythonModel:
                 {
                     "role": "user",
                     "content": [
-                        # vLLM nhận ảnh qua image_url với data URI base64
                         {
                             "type": "image_url",
                             "image_url": {
@@ -100,8 +79,8 @@ class TritonPythonModel:
                 },
             ],
             "max_tokens": self.max_tokens,
-            "temperature": 0.0,   # Deterministic — quan trọng cho OCR
-            "stream": True,       # Streaming để cancel mid-generation hoạt động
+            "temperature": 0.0,
+            "stream": True,
         }
 
         body = json.dumps(payload).encode("utf-8")
@@ -121,9 +100,8 @@ class TritonPythonModel:
 
             if resp.status != 200:
                 detail = resp.read().decode("utf-8", errors="replace")
-                raise RuntimeError(f"Engine HTTP {resp.status}: {detail}")
+                raise RuntimeError(f"vLLM HTTP {resp.status}: {detail}")
 
-            # Parse SSE stream: "data: {...}\n\n" hoặc "data: [DONE]\n\n"
             full_text = ""
             buf = b""
             token_count = 0
@@ -140,7 +118,6 @@ class TritonPythonModel:
                     if not line:
                         continue
 
-                    # SSE format: "data: <json>" hoặc "data: [DONE]"
                     if line.startswith(b"data: "):
                         data = line[6:]
                     else:
@@ -154,7 +131,6 @@ class TritonPythonModel:
                     except json.JSONDecodeError:
                         continue
 
-                    # OpenAI streaming delta format
                     choices = obj.get("choices", [])
                     if choices:
                         delta = choices[0].get("delta", {})
@@ -163,7 +139,7 @@ class TritonPythonModel:
                             full_text += token_text
                             token_count += 1
 
-                        # Cancel check mỗi 5 token — giống cơ chế dots.ocr
+                        # Cancel check mỗi 5 token qua Redis
                         if request_id and token_count % 5 == 0:
                             if self._redis.exists(f"cancel:{request_id}"):
                                 self._redis.delete(f"cancel:{request_id}")
@@ -178,7 +154,7 @@ class TritonPythonModel:
             conn.close()
 
         if not full_text:
-            raise RuntimeError("Engine returned no output")
+            raise RuntimeError("vLLM returned no output")
 
         return full_text.strip()
 
@@ -187,11 +163,9 @@ class TritonPythonModel:
 
         for request in requests:
             try:
-                prompt_tensor = pb_utils.get_input_tensor_by_name(request, "PROMPT")
                 image_b64_tensor = pb_utils.get_input_tensor_by_name(
                     request, "IMAGE_B64"
                 )
-
                 if image_b64_tensor is None:
                     raise ValueError("Missing input tensor: IMAGE_B64")
 
@@ -199,8 +173,7 @@ class TritonPythonModel:
                 if not image_b64.strip():
                     raise ValueError("IMAGE_B64 must be provided")
 
-                # Nếu PROMPT được truyền và không rỗng, dùng làm user prompt.
-                # Ngược lại dùng DEFAULT_USER_PROMPT.
+                prompt_tensor = pb_utils.get_input_tensor_by_name(request, "PROMPT")
                 user_prompt = DEFAULT_USER_PROMPT
                 if prompt_tensor is not None:
                     raw = _to_str(prompt_tensor.as_numpy().reshape(-1)[0]).strip()

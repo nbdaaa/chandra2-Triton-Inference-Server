@@ -1,10 +1,10 @@
 services:
-  triton:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        TRITON_IMAGE_TAG: ${TRITON_IMAGE_TAG}
+
+  # ── vLLM: serve Chandra 2 model qua OpenAI-compatible API ──────────────────
+  # Dùng official nightly image — đã có Qwen3_5ForConditionalGeneration support,
+  # không cần build từ source, pull về là dùng ngay.
+  vllm:
+    image: vllm/vllm-openai:nightly
     network_mode: host
     ipc: host
     deploy:
@@ -14,7 +14,44 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    entrypoint: ["/bin/bash", "/entrypoint.sh"]
+    volumes:
+      - ${HF_CACHE_PATH}:/root/.cache/huggingface
+    command: >
+      --model datalab-to/chandra-ocr-2
+      --served-model-name chandra_ocr
+      --host 0.0.0.0
+      --port ${VLLM_PORT:-8010}
+      --max-model-len 32768
+      --gpu-memory-utilization 0.9
+      --dtype bfloat16
+      --limit-mm-per-prompt '{"image": 1}'
+    # Uncommment sau khi model đã cache xong:
+    # environment:
+    #   - HF_HUB_OFFLINE=1
+    #   - TRANSFORMERS_OFFLINE=1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${VLLM_PORT:-8010}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 180s
+
+  # ── Triton: pipeline Python backend — proxy + cancel logic ─────────────────
+  # Triton không chạy vLLM nữa — chỉ load pipeline backend để nhận request
+  # từ FastAPI, format prompt, gọi vLLM container qua HTTP, trả kết quả về.
+  # Dockerfile giờ chỉ cần update backend model.py, không cần install vLLM.
+  triton:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        TRITON_IMAGE_TAG: ${TRITON_IMAGE_TAG}
+    network_mode: host
+    ipc: host
+    depends_on:
+      vllm:
+        condition: service_healthy
     volumes:
       - ./docker-entrypoint.sh:/entrypoint.sh
       - ${MODEL_REPO_PATH}:/models
@@ -28,30 +65,19 @@ services:
       - TRITON_HTTP_PORT=${TRITON_HTTP_PORT}
       - TRITON_GRPC_PORT=${TRITON_GRPC_PORT}
       - TRITON_METRICS_PORT=${TRITON_METRICS_PORT}
-      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-      - VLLM_LOGGING_LEVEL=DEBUG
+      # Pipeline sẽ gọi vLLM container qua port này
+      - VLLM_PORT=${VLLM_PORT:-8010}
       - REDIS_URL=redis://localhost:${REDIS_PORT}
-      # Uncomment after the model is fully cached:
-      # - HF_HUB_OFFLINE=1
-      # - TRANSFORMERS_OFFLINE=1
+    entrypoint: ["/bin/bash", "/entrypoint.sh"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:${TRITON_HTTP_PORT}/v2/health/ready"]
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 120s
-
-  redis:
-    image: redis:${REDIS_IMAGE_TAG}
-    network_mode: host
-    command: redis-server --port ${REDIS_PORT}
+      start_period: 60s
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "redis-cli", "-p", "${REDIS_PORT}", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
 
+  # ── FastAPI: nhận PDF/image từ client, gọi Triton pipeline ─────────────────
   api:
     build:
       context: ./api
@@ -68,6 +94,18 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # ── Redis: lưu job state + cancel keys ─────────────────────────────────────
+  redis:
+    image: redis:${REDIS_IMAGE_TAG}
+    network_mode: host
+    command: redis-server --port ${REDIS_PORT}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "${REDIS_PORT}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
   redisinsight:
     image: redis/redisinsight:latest
     network_mode: host
@@ -75,6 +113,7 @@ services:
     depends_on:
       - redis
 
+  # ── Monitoring ──────────────────────────────────────────────────────────────
   prometheus:
     image: prom/prometheus:${PROMETHEUS_IMAGE_TAG}
     networks:
