@@ -1,224 +1,464 @@
 import asyncio
 import base64
-import io
+import http.client
 import json
+import logging
 import os
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List, Optional
+from typing import Dict, Optional
+from urllib.parse import urlparse
 
-import fitz
-import numpy as np
-import redis
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
-from PIL import Image
-from pydantic import BaseModel
-from tritonclient.http import InferenceServerClient, InferInput, InferRequestedOutput
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-TRITON_URL = os.getenv("TRITON_URL", "http://localhost:8000")
-API_PORT = int(os.getenv("API_PORT", "18080"))
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
-PIPELINE_MODEL_NAME = os.getenv("PIPELINE_MODEL_NAME", "pipeline")
+import glob
+import subprocess
+import tempfile
 
-DEFAULT_PROMPT = """Please output the layout information from the PDF image, including each layout element's bbox, its category, and the corresponding text content within the bbox.
-
-1. Bbox format: [x1, y1, x2, y2]
-
-2. Layout Categories: The possible categories are ['Caption', 'Footnote', 'Formula', 'List-item', 'Page-footer', 'Page-header', 'Picture', 'Section-header', 'Table', 'Text', 'Title'].
-
-3. Text Extraction & Formatting Rules:
-    - Picture: For the 'Picture' category, the text field should be omitted.
-    - Formula: Format its text as LaTeX.
-    - Table: Format its text as HTML.
-    - All Others (Text, Title, etc.): Format their text as Markdown.
-
-4. Constraints:
-    - The output text must be the original text from the image, with no translation.
-    - All layout elements must be sorted according to human reading order.
-
-5. Final Output: The entire output must be a single JSON object.
-
-Your response must be a single valid JSON object only. Do not output Markdown. Do not wrap the JSON in code fences. Do not add any explanation, note, prefix, suffix, or extra text before or after the JSON. The output must be parseable by a standard JSON parser."""
-
-app = FastAPI(title="Chandra 2 OCR API", version="1.0.0")
-redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
-executor = ThreadPoolExecutor(max_workers=max(2, (os.cpu_count() or 2)))
+import redis.asyncio as aioredis
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response, StreamingResponse
 
 
-class ImageInferResponse(BaseModel):
-    text: str
-
-
-class PdfJobResponse(BaseModel):
-    job_id: str
-    status: str
-
-
-def _triton_client() -> InferenceServerClient:
-    return InferenceServerClient(url=TRITON_URL.replace("http://", "").replace("https://", ""))
-
-
-def _as_png_bytes(image: Image.Image) -> bytes:
-    buf = io.BytesIO()
-    image.save(buf, format="PNG")
-    return buf.getvalue()
-
-
-def _normalize_image(file_bytes: bytes) -> bytes:
-    image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
-    return _as_png_bytes(image)
-
-
-def _b64(data: bytes) -> str:
-    return base64.b64encode(data).decode("utf-8")
-
-
-def _infer_image_bytes(image_bytes: bytes, prompt: str, request_id: str = "") -> str:
-    client = _triton_client()
-
-    prompt_input = InferInput("PROMPT", [1], "BYTES")
-    image_input = InferInput("IMAGE_B64", [1], "BYTES")
-    request_input = InferInput("REQUEST_ID", [1], "BYTES")
-
-    prompt_input.set_data_from_numpy(np.array([prompt], dtype=object))
-    image_input.set_data_from_numpy(np.array([_b64(image_bytes)], dtype=object))
-    request_input.set_data_from_numpy(np.array([request_id], dtype=object))
-
-    result = client.infer(
-        model_name=PIPELINE_MODEL_NAME,
-        inputs=[prompt_input, image_input, request_input],
-        outputs=[InferRequestedOutput("TEXT")],
+def JSONResponse(content, **kwargs):
+    return Response(
+        content=json.dumps(content, ensure_ascii=False),
+        media_type="application/json",
+        **kwargs,
     )
-    out = result.as_numpy("TEXT")
-    if out is None or len(out) == 0:
-        raise RuntimeError("No TEXT output returned from Triton pipeline")
-    value = out.reshape(-1)[0]
-    if isinstance(value, bytes):
-        return value.decode("utf-8")
-    return str(value)
 
 
-def _render_pdf_pages(pdf_bytes: bytes, dpi: int) -> List[bytes]:
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    zoom = dpi / 72.0
-    matrix = fitz.Matrix(zoom, zoom)
-    rendered: List[bytes] = []
-    for page in doc:
-        pix = page.get_pixmap(matrix=matrix, alpha=False)
-        rendered.append(pix.tobytes("png"))
-    doc.close()
-    return rendered
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+TRITON_URL    = os.environ.get("TRITON_URL", "http://localhost:8000")
+OCR_INFER_URL = f"{TRITON_URL}/v2/models/pipeline/infer"
+REDIS_URL     = os.environ.get("REDIS_URL", "redis://localhost:6379")
+JOB_TTL       = int(os.environ.get("JOB_TTL_DAYS", "7")) * 86400
+CANCEL_TTL    = 60
+DPI           = 200
+PDF_STORE_DIR = os.environ.get("PDF_STORE_DIR", "/data/pdfs")
+
+os.makedirs(PDF_STORE_DIR, exist_ok=True)
+
+# ── Default prompt cho Chandra 2 ──────────────────────────────────────────────
+# Chandra 2 (Qwen3-VL base) không cần JSON schema phức tạp như dots.ocr.
+# Model tự output Markdown với layout preserved.
+# Prompt ngắn gọn hoạt động tốt nhất theo official chandra-ocr library.
+#
+# Khác biệt với dots.ocr:
+#   - dots.ocr: prompt dài chỉ định JSON schema với bbox + category + text
+#   - Chandra 2: prompt ngắn, output là Markdown (tables, math, headings...)
+#
+# PROMPT này được truyền vào pipeline dưới dạng PROMPT tensor.
+# Pipeline sẽ dùng nó làm user message content (sau image).
+# System prompt được inject cứng trong pipeline/model.py.
+DEFAULT_PROMPT = (
+    "Convert this document image to markdown. "
+    "Preserve the layout, tables, math equations, and all text content exactly as it appears."
+)
+
+thread_pool = ThreadPoolExecutor(max_workers=16)
+
+_active: Dict[str, Dict] = {}
+_redis: aioredis.Redis = None
 
 
-def _job_key(job_id: str) -> str:
-    return f"job:{job_id}"
+@app.on_event("startup")
+async def _startup():
+    global _redis
+    _redis = aioredis.from_url(REDIS_URL, decode_responses=True)
+    async for key in _redis.scan_iter("job:*"):
+        if await _redis.hget(key, "status") == "processing":
+            await _redis.hset(key, "status", "paused")
 
 
-def _set_job(job_id: str, payload: Dict[str, Any]) -> None:
-    redis_client.set(_job_key(job_id), json.dumps(payload, ensure_ascii=False))
+@app.on_event("shutdown")
+async def _shutdown():
+    await _redis.aclose()
 
 
-def _get_job(job_id: str) -> Optional[Dict[str, Any]]:
-    raw = redis_client.get(_job_key(job_id))
-    return json.loads(raw) if raw else None
+# ─── Redis helpers ─────────────────────────────────────────────────────────────
 
-
-def _cancel_key(job_id: str) -> str:
-    return f"cancel:{job_id}"
-
-
-def _pdf_worker(job_id: str, pdf_bytes: bytes, prompt: str, dpi: int) -> None:
-    try:
-        pages = _render_pdf_pages(pdf_bytes, dpi=dpi)
-        state = {
-            "job_id": job_id,
-            "status": "running",
-            "pages_total": len(pages),
-            "pages_done": 0,
-            "results": [],
-            "error": None,
-        }
-        _set_job(job_id, state)
-
-        for idx, page_bytes in enumerate(pages, start=1):
-            if redis_client.exists(_cancel_key(job_id)):
-                redis_client.delete(_cancel_key(job_id))
-                state["status"] = "cancelled"
-                _set_job(job_id, state)
-                return
-
-            text = _infer_image_bytes(page_bytes, prompt=prompt, request_id=job_id)
-            state["results"].append({"page": idx, "text": text})
-            state["pages_done"] = idx
-            _set_job(job_id, state)
-
-        state["status"] = "completed"
-        _set_job(job_id, state)
-    except Exception as exc:
-        state = _get_job(job_id) or {"job_id": job_id, "results": []}
-        state["status"] = "failed"
-        state["error"] = str(exc)
-        _set_job(job_id, state)
-
-
-@app.get("/healthz")
-def healthz() -> Dict[str, str]:
-    return {"status": "ok"}
-
-
-@app.post("/infer-image", response_model=ImageInferResponse)
-async def infer_image(
-    file: UploadFile = File(...),
-    prompt: str = Form(DEFAULT_PROMPT),
-) -> ImageInferResponse:
-    file_bytes = await file.read()
-    if not file_bytes:
-        raise HTTPException(status_code=400, detail="Empty upload")
-    image_bytes = _normalize_image(file_bytes)
-    try:
-        loop = asyncio.get_running_loop()
-        text = await loop.run_in_executor(executor, _infer_image_bytes, image_bytes, prompt, "")
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    return ImageInferResponse(text=text)
-
-
-@app.post("/infer-pdf", response_model=PdfJobResponse)
-async def infer_pdf(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
-    prompt: str = Form(DEFAULT_PROMPT),
-    dpi: int = Form(200),
-) -> PdfJobResponse:
-    pdf_bytes = await file.read()
-    if not pdf_bytes:
-        raise HTTPException(status_code=400, detail="Empty upload")
-    job_id = str(uuid.uuid4())
-    initial = {
-        "job_id": job_id,
-        "status": "queued",
-        "pages_total": 0,
-        "pages_done": 0,
-        "results": [],
-        "error": None,
+async def _job_set(job_id: str, **fields):
+    mapping = {
+        k: json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else str(v)
+        for k, v in fields.items()
     }
-    _set_job(job_id, initial)
-    background_tasks.add_task(_pdf_worker, job_id, pdf_bytes, prompt, dpi)
-    return PdfJobResponse(job_id=job_id, status="queued")
+    await _redis.hset(f"job:{job_id}", mapping=mapping)
+    await _redis.expire(f"job:{job_id}", JOB_TTL)
 
 
-@app.get("/jobs/{job_id}")
-def get_job(job_id: str) -> Dict[str, Any]:
-    job = _get_job(job_id)
-    if not job:
+async def _job_get(job_id: str) -> Optional[dict]:
+    data = await _redis.hgetall(f"job:{job_id}")
+    return data if data else None
+
+
+async def _job_incr(job_id: str, field: str, amount: int = 1):
+    await _redis.hincrby(f"job:{job_id}", field, amount)
+    await _redis.expire(f"job:{job_id}", JOB_TTL)
+
+
+async def _page_save(job_id: str, idx: int, result: dict):
+    await _redis.hset(f"job:{job_id}", f"result:{idx}", json.dumps(result, ensure_ascii=False))
+    await _redis.expire(f"job:{job_id}", JOB_TTL)
+
+
+def _build_summary(job_id: str, data: dict, include_results: bool = False) -> dict:
+    int_fields = {
+        "total_pages", "ocr_processed_pages", "ocr_success_pages",
+        "ocr_fail_pages", "ocr_remaining_pages",
+    }
+    summary = {
+        "job_id":   job_id,
+        "status":   data.get("status", "unknown"),
+        "filename": data.get("filename", ""),
+        **{f: int(data.get(f, 0)) for f in int_fields},
+    }
+    if include_results and summary["status"] in ("completed", "paused"):
+        results = {}
+        for k, v in data.items():
+            if k.startswith("result:"):
+                results[int(k.split(":", 1)[1])] = json.loads(v)
+        summary["result"] = [results[i] for i in sorted(results)]
+    if summary["status"] == "failed":
+        summary["error"] = data.get("error", "")
+    return summary
+
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def render_pdf_pages(pdf_bytes: bytes) -> list:
+    pages = []
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pdf_path   = os.path.join(tmpdir, "input.pdf")
+        out_prefix = os.path.join(tmpdir, "page")
+        with open(pdf_path, "wb") as f:
+            f.write(pdf_bytes)
+        subprocess.run(
+            ["pdftoppm", "-png", "-r", str(DPI), pdf_path, out_prefix],
+            check=True,
+            capture_output=True,
+        )
+        for img_path in sorted(glob.glob(f"{out_prefix}-*.png")):
+            with open(img_path, "rb") as f:
+                pages.append(base64.b64encode(f.read()).decode())
+    return pages
+
+
+def ocr_page_sync(image_b64: str, prompt: str, cancel_event: threading.Event, request_id: str) -> str:
+    """Gọi Triton pipeline qua HTTP.
+    Interface giữ nguyên — chỉ pipeline/model.py thay đổi bên trong.
+    """
+    if cancel_event.is_set():
+        raise RuntimeError("Cancelled")
+
+    payload = {
+        "inputs": [
+            {"name": "PROMPT",     "shape": [1], "datatype": "BYTES", "data": [prompt]},
+            {"name": "IMAGE_B64",  "shape": [1], "datatype": "BYTES", "data": [image_b64]},
+            {"name": "REQUEST_ID", "shape": [1], "datatype": "BYTES", "data": [request_id]},
+        ]
+    }
+    body   = json.dumps(payload).encode()
+    parsed = urlparse(OCR_INFER_URL)
+    conn   = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=1800)
+
+    done = threading.Event()
+
+    def _watchdog():
+        cancel_event.wait()
+        if not done.is_set():
+            conn.close()
+
+    threading.Thread(target=_watchdog, daemon=True).start()
+
+    try:
+        conn.request("POST", parsed.path, body=body, headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        if resp.status != 200:
+            err = resp.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Triton HTTP {resp.status}: {err}")
+        try:
+            data = resp.read()
+        except (http.client.HTTPException, ConnectionError, OSError):
+            if cancel_event.is_set():
+                raise RuntimeError("Cancelled")
+            raise RuntimeError("Connection lost")
+    finally:
+        done.set()
+        conn.close()
+
+    if cancel_event.is_set():
+        raise RuntimeError("Cancelled")
+
+    result = json.loads(data)
+    for out in result.get("outputs", []):
+        if out["name"] == "TEXT":
+            return out["data"][0]
+    raise RuntimeError(f"Unexpected Triton response: {result}")
+
+
+# ─── POST /infer-image ────────────────────────────────────────────────────────
+
+@app.post("/infer-image")
+async def infer_image(
+    file:   UploadFile = File(...),
+    prompt: str        = Form(default=DEFAULT_PROMPT),
+):
+    if not prompt:
+        prompt = DEFAULT_PROMPT
+    image_b64 = base64.b64encode(await file.read()).decode()
+    loop = asyncio.get_event_loop()
+    try:
+        text = await loop.run_in_executor(
+            thread_pool, ocr_page_sync, image_b64, prompt, threading.Event(), str(uuid.uuid4())
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return JSONResponse({"text": text})
+
+
+# ─── Shared: run OCR pages and stream results ─────────────────────────────────
+
+async def _run_ocr_stream(job_id: str, file_filename: str, pages_to_process: list, prompt: str, loop):
+    filename_stem = os.path.splitext(file_filename)[0]
+    cancel_event: threading.Event = threading.Event()
+    result_queue: asyncio.Queue   = asyncio.Queue()
+    _active[job_id] = {
+        "cancel_event":       cancel_event,
+        "page_tasks":         [],
+        "active_request_ids": set(),
+    }
+
+    async def ocr_one(i: int, image_b64: str):
+        request_id  = str(uuid.uuid4())
+        page_result = None
+
+        _active[job_id]["active_request_ids"].add(request_id)
+        try:
+            text = await loop.run_in_executor(
+                thread_pool, ocr_page_sync, image_b64, prompt, cancel_event, request_id
+            )
+            page_result = {
+                "file_path":  file_filename,
+                "filename":   filename_stem,
+                "page_idx":   i,
+                "image_path": f"{filename_stem}_page_{i:04d}.png",
+                "response":   text,
+            }
+            await _page_save(job_id, i, page_result)
+            await _job_incr(job_id, "ocr_success_pages")
+        except asyncio.CancelledError:
+            await _job_incr(job_id, "ocr_fail_pages")
+            raise
+        except Exception as e:
+            logger.error("[job=%s page=%d] OCR failed: %s", job_id, i, e, exc_info=True)
+            await _job_incr(job_id, "ocr_fail_pages")
+        finally:
+            _active[job_id]["active_request_ids"].discard(request_id)
+            await _job_incr(job_id, "ocr_processed_pages")
+            await _job_incr(job_id, "ocr_remaining_pages", -1)
+            result_queue.put_nowait(page_result)
+
+    tasks = [asyncio.create_task(ocr_one(i, img)) for i, img in pages_to_process]
+    _active[job_id]["page_tasks"] = tasks
+    n = len(pages_to_process)
+
+    async def stream():
+        yield json.dumps({"job_id": job_id, "status": "processing"}, ensure_ascii=False) + "\n"
+        for _ in range(n):
+            page_result = await result_queue.get()
+            if page_result is not None:
+                yield json.dumps(page_result, ensure_ascii=False) + "\n"
+
+        current = await _redis.hget(f"job:{job_id}", "status")
+        if current == "processing":
+            await _job_set(job_id, status="completed")
+            current = "completed"
+
+        _active.pop(job_id, None)
+        yield json.dumps({"job_id": job_id, "status": current}, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+
+# ─── POST /infer-pdf ──────────────────────────────────────────────────────────
+
+@app.post("/infer-pdf")
+async def infer_pdf(
+    file:   UploadFile = File(...),
+    prompt: str        = Form(default=DEFAULT_PROMPT),
+):
+    if not prompt:
+        prompt = DEFAULT_PROMPT
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are accepted")
+
+    pdf_bytes = await file.read()
+    loop      = asyncio.get_event_loop()
+
+    try:
+        all_pages = await loop.run_in_executor(thread_pool, render_pdf_pages, pdf_bytes)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to render PDF: {e}")
+
+    total = len(all_pages)
+    if total == 0:
+        raise HTTPException(status_code=422, detail="PDF has no renderable pages")
+
+    job_id   = str(uuid.uuid4())
+    pdf_path = os.path.join(PDF_STORE_DIR, f"{job_id}.pdf")
+    with open(pdf_path, "wb") as f:
+        f.write(pdf_bytes)
+
+    await _job_set(
+        job_id,
+        status              = "processing",
+        filename            = file.filename,
+        pdf_path            = pdf_path,
+        prompt              = prompt,
+        total_pages         = total,
+        ocr_processed_pages = 0,
+        ocr_success_pages   = 0,
+        ocr_fail_pages      = 0,
+        ocr_remaining_pages = total,
+    )
+
+    return await _run_ocr_stream(job_id, file.filename, list(enumerate(all_pages)), prompt, loop)
+
+
+# ─── POST /pause-pdf/{job_id} ─────────────────────────────────────────────────
+
+@app.post("/pause-pdf/{job_id}")
+async def pause_pdf(job_id: str):
+    job_data = await _job_get(job_id)
+    if not job_data:
         raise HTTPException(status_code=404, detail="Job not found")
-    return job
+    if job_data.get("status") != "processing":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Job is not processing (status: {job_data.get('status')})",
+        )
+
+    await _job_set(job_id, status="paused")
+
+    active = _active.get(job_id)
+    if active:
+        for rid in list(active["active_request_ids"]):
+            await _redis.setex(f"cancel:{rid}", CANCEL_TTL, "1")
+
+        active["cancel_event"].set()
+        for task in active.get("page_tasks", []):
+            task.cancel()
+
+    fresh       = await _job_get(job_id)
+    pages_saved = sum(1 for k in fresh if k.startswith("result:"))
+
+    return JSONResponse({
+        "job_id":          job_id,
+        "status":          "paused",
+        "pages_saved":     pages_saved,
+        "pages_remaining": int(fresh.get("total_pages", 0)) - pages_saved,
+    })
 
 
-@app.post("/jobs/{job_id}/cancel")
-def cancel_job(job_id: str) -> Dict[str, str]:
-    job = _get_job(job_id)
-    if not job:
+# ─── POST /resume-pdf/{job_id} ────────────────────────────────────────────────
+
+@app.post("/resume-pdf/{job_id}")
+async def resume_pdf(job_id: str):
+    job_data = await _job_get(job_id)
+    if not job_data:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    if job_data.get("status") not in ("paused", "failed"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Job is not paused (status: {job_data.get('status')})",
+        )
+
+    pdf_path = job_data.get("pdf_path")
+    if not pdf_path or not os.path.exists(pdf_path):
+        raise HTTPException(status_code=500, detail="Stored PDF not found on disk")
+
+    loop = asyncio.get_event_loop()
+    with open(pdf_path, "rb") as f:
+        pdf_bytes = f.read()
+
+    try:
+        all_pages = await loop.run_in_executor(thread_pool, render_pdf_pages, pdf_bytes)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to render PDF: {e}")
+
+    total        = len(all_pages)
+    stored_total = int(job_data.get("total_pages", 0))
+    if total != stored_total:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Stored PDF has {total} pages but job expects {stored_total}",
+        )
+
+    done_indices     = {int(k.split(":", 1)[1]) for k in job_data if k.startswith("result:")}
+    pages_to_process = [(i, all_pages[i]) for i in range(total) if i not in done_indices]
+    remaining        = len(pages_to_process)
+
+    await _job_set(
+        job_id,
+        status              = "processing",
+        ocr_remaining_pages = remaining,
+        ocr_processed_pages = total - remaining,
+        ocr_success_pages   = len(done_indices),
+        ocr_fail_pages      = 0,
+    )
+
+    prompt = job_data.get("prompt", DEFAULT_PROMPT)
+    return await _run_ocr_stream(job_id, job_data.get("filename", ""), pages_to_process, prompt, loop)
+
+
+# ─── DELETE /delete-pdf/{job_id} ──────────────────────────────────────────────
+
+@app.delete("/delete-pdf/{job_id}")
+async def delete_pdf(job_id: str):
+    job_data = await _job_get(job_id)
+    if not job_data:
         raise HTTPException(status_code=404, detail="Job not found")
-    redis_client.set(_cancel_key(job_id), "1", ex=3600)
-    return {"job_id": job_id, "status": "cancellation_requested"}
+    if job_data.get("status") == "processing":
+        raise HTTPException(
+            status_code=400,
+            detail="Job is currently processing. Pause it first with POST /pause-pdf/{job_id}",
+        )
+
+    pdf_path = job_data.get("pdf_path")
+    if pdf_path and os.path.exists(pdf_path):
+        os.remove(pdf_path)
+
+    await _redis.delete(f"job:{job_id}")
+    return JSONResponse({"job_id": job_id, "deleted": True})
+
+
+# ─── Status endpoints ─────────────────────────────────────────────────────────
+
+@app.get("/pdf-status")
+async def list_all_status():
+    results = []
+    async for key in _redis.scan_iter("job:*"):
+        data = await _redis.hgetall(key)
+        if data:
+            results.append(_build_summary(key[4:], data))
+    return JSONResponse(results)
+
+
+@app.get("/pdf-status/{job_id}")
+async def get_status(job_id: str):
+    data = await _job_get(job_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return JSONResponse(_build_summary(job_id, data, include_results=True))
