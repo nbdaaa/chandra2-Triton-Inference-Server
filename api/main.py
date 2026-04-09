@@ -464,3 +464,9 @@ async def get_status(job_id: str):
     if not data:
         raise HTTPException(status_code=404, detail="Job not found")
     return JSONResponse(_build_summary(job_id, data, include_results=True))
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy"}
