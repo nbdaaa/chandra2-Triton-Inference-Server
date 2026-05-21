@@ -113,6 +113,18 @@ services:
     depends_on:
       - redis
 
+  # ── Web UI ──────────────────────────────────────────────────────────────────
+  web:
+    image: nginx:alpine
+    network_mode: host
+    volumes:
+      - ./web/index.html:/usr/share/nginx/html/index.html:ro
+      - ./web/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+
   # ── Monitoring ──────────────────────────────────────────────────────────────
   prometheus:
     image: prom/prometheus:${PROMETHEUS_IMAGE_TAG}

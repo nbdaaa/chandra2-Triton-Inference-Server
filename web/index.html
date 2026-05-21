@@ -1,0 +1,1233 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>PDF to Markdown OCR Processor</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script src="https://cdn.jsdelivr.net/npm/lucide@latest/dist/umd/lucide.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"/>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+<style data-purpose="custom-fonts">
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Fira+Code:wght@400&display=swap');
+    body { font-family: 'Inter', sans-serif; }
+    .font-mono { font-family: 'Fira Code', monospace; }
+</style>
+<style data-purpose="scrollbar">
+    .custom-scrollbar::-webkit-scrollbar { width: 14px; }
+    .custom-scrollbar::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 8px; }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background: #c1c1c1; border-radius: 8px; border: 3px solid #f1f1f1; }
+    .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #a8a8a8; }
+</style>
+<style data-purpose="extras">
+    .badge-pending    { background:#f3f4f6; color:#6b7280; }
+    .badge-uploading  { background:#ede9fe; color:#7c3aed; }
+    .badge-processing { background:#fef3c7; color:#d97706; }
+    .badge-done       { background:#dcfce7; color:#15803d; }
+    .badge-error      { background:#fee2e2; color:#dc2626; }
+    .badge-cancelled  { background:#f3f4f6; color:#6b7280; }
+    .badge-paused     { background:#e0f2fe; color:#0369a1; }
+
+    .progress-wrap { height:3px; background:#e5e7eb; border-radius:3px; margin-top:5px; overflow:hidden; }
+    .progress-bar  { height:100%; background:linear-gradient(90deg,#7c3aed,#a78bfa); border-radius:3px; transition:width 0.4s; }
+
+    .file-item .del-btn { display:none; }
+    .file-item:hover .del-btn { display:flex; }
+
+    @keyframes dot-pulse { 0%,80%,100%{opacity:.3} 40%{opacity:1} }
+    .dot-pulse span { display:inline-block; width:3px; height:3px; background:currentColor; border-radius:50%; margin:0 1px; animation:dot-pulse 1.2s infinite; }
+    .dot-pulse span:nth-child(2){animation-delay:.2s}
+    .dot-pulse span:nth-child(3){animation-delay:.4s}
+
+    #copiedTooltip { display:none; }
+    #copiedTooltip.show { display:block; }
+
+    #previewContent h1{font-size:1.5rem;font-weight:700;margin:1.2em 0 .4em;border-bottom:1px solid #e5e7eb;padding-bottom:6px;}
+    #previewContent h2{font-size:1.2rem;font-weight:600;margin:1em 0 .3em;}
+    #previewContent h3{font-size:1rem;font-weight:600;margin:.8em 0 .25em;}
+    #previewContent p{margin:.5em 0;}
+    #previewContent ul{padding-left:1.5em;margin:.5em 0;list-style-type:disc;}
+    #previewContent ol{padding-left:1.5em;margin:.5em 0;list-style-type:decimal;}
+    #previewContent ul ul{list-style-type:circle;}
+    #previewContent ul ul ul{list-style-type:square;}
+    #previewContent li{margin:.2em 0;display:list-item;}
+    #previewContent table{width:100%;border-collapse:collapse;margin:.8em 0;font-size:.875rem;}
+    #previewContent th,#previewContent td{border:1px solid #e5e7eb;padding:6px 10px;text-align:left;}
+    #previewContent th{background:#f9fafb;font-weight:600;}
+    #previewContent code{font-family:'Fira Code',monospace;font-size:.8rem;background:#f3f4f6;padding:1px 5px;border-radius:3px;}
+    #previewContent pre{background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:12px;overflow-x:auto;margin:.8em 0;}
+    #previewContent pre code{background:none;padding:0;}
+    #previewContent blockquote{border-left:3px solid #7c3aed;margin:.8em 0;padding:2px 12px;color:#6b7280;background:#faf5ff;border-radius:0 6px 6px 0;}
+    #previewContent hr{border:none;border-top:1px solid #e5e7eb;margin:1.2em 0;}
+    #previewContent strong{font-weight:600;}
+
+/* processing block */
+.c-proc{border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;margin:2px 0;background:#fafafa;width:100%}
+.c-proc-hd{display:flex;align-items:center;gap:8px;padding:7px 12px;cursor:pointer;user-select:none;transition:background .12s}
+.c-proc-hd:hover{background:#f3f4f6}
+.c-proc-dot{display:flex;gap:3px;align-items:center}
+.c-proc-dot span{width:5px;height:5px;border-radius:50%;background:#a78bfa;animation:cDot 1.4s ease-in-out infinite}
+.c-proc-dot span:nth-child(2){animation-delay:.2s}.c-proc-dot span:nth-child(3){animation-delay:.4s}
+.c-proc-dot.done span{background:#9ca3af;animation:none}
+.c-proc-label{font-size:12.5px;color:#6b7280;flex:1}
+.c-proc-label.done{color:#9ca3af}
+.c-proc-chev{font-size:11px;color:#9ca3af;transition:transform .2s}
+.c-proc-chev.open{transform:rotate(90deg)}
+.c-proc-body{display:none;border-top:1px solid #f0f0f0;background:#fff;padding:10px 12px;display:flex;flex-direction:column;gap:6px}
+.c-proc-body.hidden{display:none!important}
+
+/* chat pane */
+.c-agent-row{display:flex;gap:10px;align-items:flex-start}
+.c-agent-av{width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,#7c3aed,#a78bfa);display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;flex-shrink:0;margin-top:1px}
+.c-agent-text{font-size:14px;color:#1a1a1a;line-height:1.6;word-break:break-word;flex:1;min-width:0}
+.c-user-bubble{align-self:flex-end;max-width:78%;background:#f4f0ff;border-radius:18px 18px 4px 18px;padding:10px 14px;font-size:14px;color:#1a1a1a;line-height:1.55;word-break:break-word}
+.c-input-box{display:flex;align-items:flex-end;gap:8px;background:#f9fafb;border:1.5px solid #e5e7eb;border-radius:14px;padding:8px 10px 8px 14px}
+.c-input-box:focus-within,.c-input-box:hover{border-color:#e5e7eb;box-shadow:none;outline:none}
+.c-inp{flex:1;background:transparent;border:none;outline:none;box-shadow:none;font-size:14px;color:#111;font-family:'Inter',sans-serif;resize:none;padding:0;min-height:22px;max-height:120px;line-height:1.5}.c-inp:focus{outline:none;box-shadow:none;border:none}
+.c-inp::placeholder{color:#9ca3af}
+.c-send-btn{width:32px;height:32px;border-radius:8px;flex-shrink:0;background:#7c3aed;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;color:#fff;transition:all .15s}
+.c-send-btn:hover:not(:disabled){background:#6d28d9}
+.c-send-btn:disabled{background:#e5e7eb;color:#9ca3af;cursor:default}
+.c-tool{border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;margin:3px 0;background:#fafafa;width:100%}
+.c-tool-hd{display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;user-select:none;transition:background .12s}
+.c-tool-hd:hover{background:#f3f4f6}
+.c-tool-icon{font-size:13px;flex-shrink:0}
+.c-tool-label{font-size:12.5px;font-weight:500;color:#374151;flex:1}
+.c-tool-status{font-size:11px;color:#a78bfa}
+.c-tool-status.done{color:#9ca3af}
+.c-tool-chev{font-size:11px;color:#9ca3af;transition:transform .2s}
+.c-tool-chev.open{transform:rotate(90deg)}
+.c-tool-body{display:none;border-top:1px solid #f0f0f0;background:#fff;padding:10px 12px;font-size:12px}
+.c-tool-body.open{display:block}
+.c-trow{display:flex;gap:8px;padding:4px 0;border-bottom:1px solid #f3f4f6;font-size:12px}
+.c-trow:last-child{border-bottom:none}
+.c-tk{color:#9ca3af;flex-shrink:0;width:100px}
+.c-tv{color:#111;flex:1;word-break:break-word}
+.c-tv.g{color:#15803d}.c-tv.r{color:#dc2626}.c-tv.b{color:#1d4ed8}.c-tv.am{color:#b45309}
+.c-json{font-family:'Fira Code',monospace;font-size:11px;color:#374151;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:7px 9px;overflow-x:auto;white-space:pre;max-height:120px;margin-top:3px}
+.c-match{background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:5px 9px;margin:2px 0;font-size:11px}
+.c-match-val{color:#111;margin-bottom:1px}
+.c-match-ctx{color:#9ca3af;font-style:italic}
+.c-match-ok{color:#15803d;margin-top:1px}
+.c-answer{background:#faf7ff;border:1px solid #e9d8fd;border-radius:10px;overflow:hidden;width:100%}
+.c-answer-hd{padding:7px 12px;border-bottom:1px solid #e9d8fd;display:flex;align-items:center;justify-content:space-between}
+.c-answer-lbl{font-size:12px;font-weight:600;color:#7c3aed}
+.c-answer-meta{font-size:11px;color:#a78bfa}
+.c-answer-body{padding:10px 12px}
+.c-doc-name{font-size:11px;font-weight:600;color:#6b7280;margin-bottom:5px}
+.c-field{display:grid;grid-template-columns:140px 1fr;padding:4px 0;gap:8px;border-bottom:1px solid #f3f4f6;font-size:13px}
+.c-field:last-child{border-bottom:none}
+.c-fk{color:#6b7280}.c-fv{color:#111;font-weight:500;word-break:break-word}
+.c-fv.contract-no{color:#b45309;font-weight:700}.c-fv.money{color:#15803d}.c-fv.date{color:#7c3aed}.c-fv.party{color:#1d4ed8}
+.c-clarify{background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:10px 12px;width:100%}
+.c-clarify-lbl{font-size:11px;font-weight:600;color:#d97706;margin-bottom:4px}
+.c-clarify-q{font-size:13px;color:#1a1a1a;padding:2px 0}
+.c-clarify-q::before{content:"\2022 ";color:#d97706}
+.c-error{background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 12px;font-size:12.5px;color:#dc2626;width:100%}
+.c-think{display:flex;align-items:center;gap:8px;color:#9ca3af;font-size:13px;padding:2px 0}
+.c-dots span{display:inline-block;width:6px;height:6px;border-radius:50%;background:#d1d5db;animation:cDot 1.4s ease-in-out infinite;margin:0 2px}
+.c-dots span:nth-child(2){animation-delay:.2s}.c-dots span:nth-child(3){animation-delay:.4s}
+@keyframes cDot{0%,80%,100%{transform:scale(.7);opacity:.5}40%{transform:scale(1);opacity:1}}
+.c-thought{font-size:13px;color:#6b7280;line-height:1.55;font-style:italic;padding:2px 0;word-break:break-word}
+.c-session-pill{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:20px;background:#f5f3ff;border:1px solid #e9d8fd;font-size:11px;color:#7c3aed}
+.c-session-x{cursor:pointer;color:#c4b5fd;margin-left:2px}.c-session-x:hover{color:#dc2626}
+</style>
+</head>
+<body class="bg-[#f5f5f5] text-gray-800 h-screen flex flex-col overflow-hidden">
+
+<!-- BEGIN: MainHeader -->
+<header class="flex items-center justify-between px-6 py-4 bg-[#f5f5f5] border-b border-gray-200/50 shrink-0" data-purpose="top-navigation">
+  <div class="flex items-center gap-3">
+    <div class="w-10 h-10 bg-purple-600 rounded-xl flex items-center justify-center text-white font-bold shadow-sm">PDF</div>
+    <h1 class="text-xl font-semibold text-gray-900 tracking-tight">PDF to Markdown OCR Processor</h1>
+  </div>
+  <div class="flex items-center gap-3">
+    <div class="flex items-center bg-white border border-gray-200 rounded-lg shadow-sm px-3 py-1.5 h-10 w-64">
+      <input id="apiBaseUrl" class="border-none p-0 focus:ring-0 text-sm w-full text-gray-600 bg-transparent" type="password" value="/api"/>
+    </div>
+    <button onclick="refreshActive()" class="w-10 h-10 flex items-center justify-center rounded-lg border border-gray-200 bg-white shadow-sm hover:bg-gray-50 text-gray-600 transition-colors" title="Refresh active file status">
+      <i class="w-4 h-4" data-lucide="rotate-cw"></i>
+    </button>
+    <button onclick="clearAll()" class="h-10 px-4 flex items-center justify-center gap-2 rounded-lg bg-black text-white text-sm font-medium hover:bg-gray-800 transition-colors shadow-sm">
+      <i class="w-4 h-4" data-lucide="plus"></i>
+      New session
+    </button>
+    <button class="w-10 h-10 flex items-center justify-center rounded-lg text-gray-500 hover:bg-gray-200 transition-colors ml-1">
+      <i class="w-5 h-5" data-lucide="moon"></i>
+    </button>
+  </div>
+</header>
+<!-- END: MainHeader -->
+
+<!-- BEGIN: MainContent -->
+<main class="flex flex-1 overflow-hidden p-8" id="mainLayout" data-purpose="application-layout" style="gap:0">
+
+  <!-- BEGIN: Sidebar -->
+  <aside id="sidebar" style="width:320px;min-width:180px;max-width:60%" class="bg-white rounded-2xl shadow-sm border border-gray-100 flex flex-col shrink-0 relative" data-purpose="sidebar">
+    <div class="p-5 flex-1 overflow-y-auto">
+      <h2 class="text-lg font-semibold text-gray-900 mb-4">PDF Sources</h2>
+
+      <!-- Dropzone -->
+      <div id="dropzone"
+        class="border-2 border-dashed border-gray-300 rounded-xl p-6 flex flex-col items-center justify-center text-center bg-gray-50/50 mb-6 cursor-pointer hover:bg-gray-50 transition-colors"
+        onclick="document.getElementById('fileInput').click()">
+        <input type="file" id="fileInput" accept=".pdf" multiple style="display:none" onchange="handleFiles(this.files); this.value=''"/>
+        <i class="w-8 h-8 text-gray-400 mb-2" data-lucide="file-plus-2"></i>
+        <p class="font-medium text-gray-900">Add PDFs for OCR</p>
+        <p class="text-xs text-gray-500 mt-1">PDF files only - drag &amp; drop</p>
+      </div>
+
+      <!-- Processed List -->
+      <div>
+        <h3 class="text-sm font-semibold text-gray-900 mb-3 px-1">Processed PDFs</h3>
+        <div id="fileList" class="space-y-1 border-t border-gray-100 pt-3"></div>
+      </div>
+    </div>
+
+    <!-- Sidebar Footer -->
+    <div class="p-4 border-t border-gray-100 text-xs text-gray-500">
+      State: <span id="sidebarState">idle</span>
+    </div>
+  </aside>
+  <!-- END: Sidebar -->
+
+  <!-- Resizer divider -->
+  <div id="resizer" style="width:8px;cursor:col-resize;flex-shrink:0;display:flex;align-items:center;justify-content:center;margin:0 4px" title="Drag to resize">
+    <div style="width:2px;height:40px;background:#e5e7eb;border-radius:2px;pointer-events:none"></div>
+  </div>
+
+  <!-- BEGIN: Main Document Area -->
+  <section class="flex-1 bg-white rounded-2xl shadow-sm border border-gray-100 flex flex-col relative" style="min-width:200px" data-purpose="document-viewer">
+
+    <!-- Document Header -->
+    <header class="flex items-center justify-between px-6 py-4 border-b border-gray-100 shrink-0">
+      <h2 id="docTitle" class="text-lg font-semibold text-gray-900">Markdown Output (Converted)</h2>
+      <div class="flex items-center gap-3">
+        <!-- Toggle -->
+        <div class="flex items-center bg-gray-100 p-1 rounded-lg">
+          <button id="tabPreviewBtn" onclick="switchTab('preview')"
+            class="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-md text-gray-600 hover:text-gray-900 transition-colors">
+            <i class="w-4 h-4" data-lucide="eye"></i>
+            Preview
+          </button>
+          <button id="tabRawBtn" onclick="switchTab('raw')"
+            class="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-md bg-[#eaddff] text-purple-900 shadow-sm transition-colors">
+            <i class="w-4 h-4" data-lucide="code-2"></i>
+            Raw
+          </button>
+          <button id="tabChatBtn" onclick="switchTab('chat')"
+            class="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-md text-gray-600 hover:text-gray-900 transition-colors">
+            <i class="w-4 h-4" data-lucide="message-square"></i>
+            Chat
+          </button>
+        </div>
+        <button id="downloadBtn" onclick="downloadMd()" style="display:none"
+          class="h-9 px-4 flex items-center justify-center gap-2 rounded-lg bg-black text-white text-sm font-medium hover:bg-gray-800 transition-colors shadow-sm">
+          <i class="w-4 h-4" data-lucide="download"></i>
+          Download Markdown
+        </button>
+        <button class="w-9 h-9 flex items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 transition-colors">
+          <i class="w-5 h-5" data-lucide="more-vertical"></i>
+        </button>
+      </div>
+    </header>
+
+    <!-- Document Content -->
+    <div class="flex-1 relative overflow-hidden bg-white rounded-b-2xl">
+
+      <!-- Floating Copy Button -->
+      <div id="copyBtnWrap" class="absolute top-4 right-8 z-10 flex-col items-end" style="display:none">
+        <button onclick="copyToClipboard()"
+          class="flex items-center gap-2 px-4 py-2 bg-black text-white text-sm font-medium rounded-lg shadow-lg hover:bg-gray-800 transition-colors">
+          <i class="w-4 h-4" data-lucide="copy"></i>
+          Copy to Clipboard
+        </button>
+        <div id="copiedTooltip"
+          class="mt-2 px-3 py-1.5 bg-[#333] text-white text-xs rounded-md shadow-md relative before:content-[''] before:absolute before:-top-1 before:right-6 before:w-2 before:h-2 before:bg-[#333] before:rotate-45">
+          Copied!
+        </div>
+      </div>
+
+      <!-- RAW pane -->
+      <div id="paneRaw" class="overflow-y-auto p-8 custom-scrollbar text-sm leading-relaxed text-gray-800 font-mono font-light whitespace-pre-wrap" style="position:absolute;inset:0">
+        <span class="text-gray-400 italic not-italic">Upload a PDF to begin OCR processing…</span>
+      </div>
+
+      <!-- PREVIEW pane -->
+      <div id="panePreview" class="overflow-y-auto p-8 custom-scrollbar text-sm leading-relaxed text-gray-800" style="position:absolute;inset:0;display:none">
+        <div id="previewContent" class="max-w-3xl mx-auto"></div>
+      </div>
+
+      <!-- CHAT pane -->
+      <div id="paneChat" class="flex flex-col overflow-hidden" style="position:absolute;inset:0;display:none">
+        <!-- agent api hidden --><input id="agentApiUrl" type="text" value="http://localhost:8000" style="display:none"/>
+        <div id="chatMsgs" style="flex:1;overflow-y:auto;padding:20px 24px;display:flex;flex-direction:column;gap:16px;background:#fff">
+          <div class="c-agent-row">
+            <div class="c-agent-av">&#10022;</div>
+            <div class="c-agent-text">Hi! Ask me anything about your OCR contracts.</div>
+          </div>
+        </div>
+        <div style="padding:12px 16px 14px;border-top:1px solid #f0f0f0;background:#fff;flex-shrink:0">
+          <div class="c-input-box">
+            <textarea id="chatInp" class="c-inp" placeholder="Ask about your contracts..."
+              onkeydown="chatKey(event)" oninput="chatResize(this)" rows="1"></textarea>
+            <button class="c-send-btn" id="chatSend" onclick="chatSend()">
+              <i data-lucide="send" style="width:15px;height:15px"></i>
+            </button>
+          </div>
+          <div style="margin-top:5px;font-size:11px;color:#9ca3af;display:flex;justify-content:space-between">
+            <span>Enter to send &middot; Shift+Enter for newline</span>
+            <span id="chatStatus">ready</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Footer -->
+    <div class="py-3 text-center text-xs text-gray-500 border-t border-gray-100 bg-white rounded-b-2xl shrink-0">
+      OCR accuracy may vary; please review the output.
+    </div>
+  </section>
+  <!-- END: Main Document Area -->
+
+</main>
+
+<script>
+// lucide init after all scripts loaded
+if (typeof lucide !== "undefined") lucide.createIcons();
+else window.addEventListener("load", () => lucide.createIcons());
+
+  // Config marked để render heading, bold, table đúng
+  marked.use({
+    gfm: true,
+    breaks: true,
+    pedantic: false,
+  });
+
+  // ─── State ───────────────────────────────────────────────────────────
+  const files = {};
+  const pollers = {};
+  let activeId = null;
+  let currentTab = 'raw';
+
+  function apiBase() {
+    return document.getElementById('apiBaseUrl').value.replace(/\/$/, '');
+  }
+
+  // ─── File handling ────────────────────────────────────────────────────
+  function uid() { return 'f' + Math.random().toString(36).slice(2, 8); }
+
+  async function handleFiles(fileList) {
+    for (const file of fileList) {
+      if (!file.name.toLowerCase().endsWith('.pdf')) continue;
+      const id = uid();
+      createFileItem(id, file.name);
+      await uploadFile(id, file);
+    }
+  }
+
+  function createFileItem(id, name) {
+    files[id] = { name, status: 'pending', jobId: null, markdown: '' };
+    const el = document.createElement('div');
+    el.id = 'fi-' + id;
+    el.className = 'file-item flex items-start gap-3 p-2 hover:bg-gray-50 rounded-lg transition-colors cursor-pointer group relative';
+    el.onclick = () => selectFile(id);
+    el.innerHTML = `
+      <i class="w-5 h-5 text-gray-400 mt-0.5 group-hover:text-gray-600 shrink-0" data-lucide="file-text"></i>
+      <div class="flex-1 min-w-0">
+        <p class="text-sm font-medium text-gray-800 truncate" title="${name}">${name}</p>
+        <div class="flex items-center gap-2 mt-1 flex-wrap">
+          <span id="badge-${id}" class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium badge-pending">Pending</span>
+          <span id="stat-${id}" class="text-[11px] text-gray-400" style="display:none"></span>
+        </div>
+        <div class="progress-wrap" id="pw-${id}" style="display:none"><div class="progress-bar" id="pb-${id}" style="width:0%"></div></div>
+        <div id="actions-${id}" class="flex items-center gap-1 mt-1.5" style="display:none">
+          <button id="btn-pause-${id}" onclick="pauseJob(event,'${id}')"
+            style="display:none" class="items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200 transition-colors">
+            <i class="w-2.5 h-2.5" data-lucide="pause"></i> Pause
+          </button>
+          <button id="btn-resume-${id}" onclick="resumeJob(event,'${id}')"
+            style="display:none" class="items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 transition-colors">
+            <i class="w-2.5 h-2.5" data-lucide="play"></i> Resume
+          </button>
+          <button id="btn-delete-${id}" onclick="deleteJob(event,'${id}')"
+            style="display:none" class="items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-red-50 text-red-600 hover:bg-red-100 border border-red-200 transition-colors">
+            <i class="w-2.5 h-2.5" data-lucide="trash-2"></i> Delete
+          </button>
+        </div>
+      </div>
+      <button class="del-btn w-6 h-6 items-center justify-center rounded text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors shrink-0 absolute right-1 top-2"
+        onclick="removeFile(event,'${id}')">✕</button>
+    `;
+    document.getElementById('fileList').appendChild(el);
+    lucide.createIcons({ nodes: [el] });
+    selectFile(id);
+  }
+
+  function removeFile(e, id) {
+    e.stopPropagation();
+    const jid = files[id]?.jobId;
+    if (jid && pollers[jid]) { clearInterval(pollers[jid]); delete pollers[jid]; }
+    document.getElementById('fi-' + id)?.remove();
+    delete files[id];
+    if (activeId === id) { activeId = null; resetViewer(); }
+    updateSidebarState();
+  }
+
+  function clearAll() {
+    Object.keys(files).forEach(id => {
+      const jid = files[id]?.jobId;
+      if (jid && pollers[jid]) { clearInterval(pollers[jid]); delete pollers[jid]; }
+      document.getElementById('fi-' + id)?.remove();
+      delete files[id];
+    });
+    activeId = null;
+    resetViewer();
+    updateSidebarState();
+  }
+
+  // ─── Upload & Poll ────────────────────────────────────────────────────
+  async function uploadFile(id, file) {
+    setBadge(id, 'uploading', 'Uploading…', true);
+    setProgress(id, 0); // chưa upload xong
+    const fd = new FormData();
+    fd.append('file', file);
+    try {
+      const res = await fetch(`${apiBase()}/infer-pdf`, { method: 'POST', body: fd });
+      if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.detail || `Server error ${res.status}`); }
+
+      // Đọc NDJSON stream từng chunk để event loop không bị block
+      // => poller có thể chạy giữa các chunk
+      const reader  = res.body.getReader();
+      const decoder = new TextDecoder();
+      let   buf     = '';
+      const pages   = [];
+
+      const handleLine = (line) => {
+        line = line.trim();
+        if (!line) return;
+        let obj;
+        try { obj = JSON.parse(line); } catch { return; }
+        const s = (obj.status || '').toLowerCase();
+
+        if (obj.job_id && s === 'processing') {
+          files[id].jobId = obj.job_id;
+          if (obj.warning) {
+            files[id].warning = obj.warning;
+            if (activeId === id) renderMarkdown(files[id].markdown || '');
+          }
+          // Lưu total pages nếu API trả về (dùng để tính %)
+          if (obj.total_pages || obj.ocr_total_pages) {
+            files[id].totalPages = obj.total_pages ?? obj.ocr_total_pages;
+          }
+          setBadge(id, 'processing', 'Processing…', true);
+          setProgress(id, 0); // chưa xử lý trang nào → 0%
+          startStatsPoller(id, obj.job_id);
+        }
+
+        if (obj.response) {
+          let items = obj.response;
+          if (typeof items === 'string') { try { items = JSON.parse(items); } catch { items = []; } }
+          const pageIdx = obj.page_idx ?? pages.length;
+          pages.push({ pageIdx, items });
+          files[id].pages = pages; // keep in sync for resume
+          // Chỉ update progress từ stream nếu đã biết totalPages
+          const total = files[id].totalPages;
+
+          if (total) {
+            setProgress(id, Math.round(pages.length / total * 100));
+          } else {
+            // fallback khi chưa biết total
+            setProgress(id, Math.min(pages.length * 5, 95));
+          }
+          updateStatLine(id, {
+            ocr_total_pages    : total,
+            ocr_processed_pages: pages.length,
+            ocr_success_pages  : pages.length,
+            ocr_fail_pages     : 0,
+          });
+          if (activeId === id) { const m = pagesToMarkdown(pages); files[id].markdown = m; renderMarkdown(m); }
+        }
+
+        if (s === 'completed' || s === 'done') {
+          stopStatsPoller(files[id].jobId);
+          setProgress(id, 100);
+          setTimeout(() => hideProgress(id), 600);
+          const md = pages.length > 0 ? pagesToMarkdown(pages) : '';
+          files[id].markdown = md;
+          setBadge(id, 'done', 'OCR Complete');
+          if (activeId === id) renderMarkdown(md);
+          updateSidebarState();
+          const jid = obj.job_id || files[id].jobId;
+          if (jid) fetch(`${apiBase()}/pdf-status/${jid}`)
+            .then(r => r.json()).then(d => updateStatLine(id, d)).catch(() => {});
+        }
+
+        if (s === 'failed' || s === 'error') {
+          stopStatsPoller(files[id].jobId);
+          hideProgress(id);
+          setBadge(id, 'error', 'Failed');
+          if (activeId === id) showMessage(`⚠ OCR failed: ${obj.message || obj.error || 'Unknown error'}`);
+          updateSidebarState();
+        }
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const parts = buf.split('\n');
+        buf = parts.pop();
+        for (const line of parts) handleLine(line);
+      }
+      if (buf.trim()) handleLine(buf);
+
+      if (pages.length > 0 && files[id]?.status !== 'done' && files[id]?.status !== 'paused') {
+        stopStatsPoller(files[id].jobId);
+        setProgress(id, 100);
+        setTimeout(() => hideProgress(id), 600);
+        const md = pagesToMarkdown(pages);
+        files[id].markdown = md;
+        setBadge(id, 'done', 'OCR Complete');
+        if (activeId === id) renderMarkdown(md);
+        updateSidebarState();
+      }
+
+    } catch (err) {
+      setBadge(id, 'error', 'Upload failed');
+      hideProgress(id);
+      hideProgress(id);
+      if (activeId === id) showMessage(`⚠ Upload failed: ${err.message}`);
+      updateSidebarState();
+    }
+  }
+
+  // Gộp nhiều trang thành markdown, sort theo page_idx
+  function pagesToMarkdown(pages) {
+    const sorted = [...pages].sort((a, b) => a.pageIdx - b.pageIdx);
+    if (sorted.length === 1) return layoutToMarkdown(sorted[0].items);
+    return sorted.map(p => `--- Page ${p.pageIdx + 1} ---\n\n` + layoutToMarkdown(p.items)).join('\n\n');
+  }
+
+  function extractMarkdown(data) {
+    if (typeof data.markdown === 'string') return data.markdown;
+    if (typeof data.result  === 'string') return data.result;
+    if (typeof data.output  === 'string') return data.output;
+    if (typeof data.text    === 'string') return data.text;
+    const items = Array.isArray(data.result) ? data.result : Array.isArray(data) ? data : null;
+    if (items) return layoutToMarkdown(items);
+    if (Array.isArray(data.pages)) {
+      return data.pages.map((pg, i) => {
+        const elems = Array.isArray(pg) ? pg : (pg.items || pg.elements || []);
+        return `--- Page ${i+1} ---\n\n` + layoutToMarkdown(elems);
+      }).join('\n\n');
+    }
+    return '```json\n' + JSON.stringify(data, null, 2) + '\n```';
+  }
+
+  function layoutToMarkdown(items) {
+    // Strip leading # từ text (API đôi khi đã có sẵn)
+    const stripHash = t => t.replace(/^#+\s*/, '').trim();
+
+    const map = {
+      // Title: luôn h1
+      'Title'         : t => `# ${stripHash(t)}`,
+      // Section-header: giữ level nếu API đã có #, không thì thêm ##
+      'Section-header': t => t.match(/^#+\s/) ? t : `## ${t}`,
+      'Text'          : t => t,
+      'List-item'     : t => {
+        // Strip leading ★ bullet nếu có
+        const clean = t.replace(/^[★•]\s*/, '');
+        return `- ${clean}`;
+      },
+      'Caption'       : t => `*${t}*`,
+      'Footnote'      : t => `> ${t}`,
+      'Table'         : t => t,
+      'Picture'       : ()  => '',
+      'Page-header'   : ()  => '',
+      'Page-footer'   : ()  => '',
+      'Formula'       : t => {
+        const s = t.trim();
+        if (s.startsWith('$$')) return s;
+        if (s.includes('$')) return s;
+        return `$$\n${s}\n$$`;
+      },
+    };
+    return items.map(item => {
+      const cat = item.category || item.type || 'Text';
+      const txt = (item.text || item.content || '').trim();
+      if (!txt) return '';
+      return (map[cat] || (t => t))(txt);
+    }).filter(t => t && t.trim()).join('\n\n');
+  }
+
+  // ─── UI helpers ───────────────────────────────────────────────────────
+  function setBadge(id, cls, label, pulse = false) {
+    if (!files[id]) return;
+    files[id].status = cls;
+    const b = document.getElementById('badge-' + id);
+    if (!b) return;
+    b.className = `inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium badge-${cls} mt-1`;
+    b.innerHTML = label + (pulse ? ` <span class="dot-pulse ml-1"><span></span><span></span><span></span></span>` : '');
+    updateJobActions(id);
+  }
+  function setProgress(id, pct) {
+    const w = document.getElementById('pw-' + id);
+    const b = document.getElementById('pb-' + id);
+    if (w) w.style.display = '';
+    if (b) b.style.width = pct + '%';
+  }
+  function hideProgress(id) {
+    const w = document.getElementById('pw-' + id);
+    if (w) w.style.display = 'none';
+  }
+  // ─── Page stats (hiển thị ngay dưới tên file) ───────────────────────
+  const statsPollers = {};
+
+  function updateSidebarState() {} // kept for compatibility
+
+  function startStatsPoller(fileId, jobId) {
+    if (statsPollers[jobId]) return;
+    pollStats(fileId, jobId);
+    const iv = setInterval(() => pollStats(fileId, jobId), 1000);
+    statsPollers[jobId] = { iv, fileId };
+  }
+
+  function stopStatsPoller(jobId) {
+    if (statsPollers[jobId]) {
+      clearInterval(statsPollers[jobId].iv);
+      delete statsPollers[jobId];
+    }
+  }
+
+  async function pollStats(fileId, jobId) {
+    try {
+      const res = await fetch(`${apiBase()}/pdf-status/${jobId}`);
+      if (!res.ok) return;
+      const data = await res.json();
+
+      // 🚨 Guard: nếu job đang paused thì không cho poll override UI
+      if (files[fileId]?.status === 'paused' && data.status !== 'paused') {
+        return;
+      }
+    // Luôn cập nhật totalPages từ poll
+      if (data.total_pages || data.ocr_total_pages) {
+        files[fileId].totalPages = data.total_pages ?? data.ocr_total_pages;
+      }
+
+      // Cập nhật progress bar từ poll khi đang processing
+      const total = files[fileId]?.totalPages;
+      const done  = data.ocr_processed_pages ?? 0;
+      if (total && files[fileId]?.status === 'processing' && !files[fileId]?.pages) {
+        setProgress(fileId, Math.round(done / total * 100));
+      }
+
+      updateStatLine(fileId, data);
+
+      const s = (data.status || '').toLowerCase();
+      if (['completed','done','failed','error','cancelled','canceled'].includes(s)) {
+        stopStatsPoller(jobId);
+      }
+      if (s === 'paused' && files[fileId]?.status === 'processing') {
+        stopStatsPoller(jobId);
+        setBadge(fileId, 'paused', 'Paused');
+        hideProgress(fileId);
+      }
+    } catch (_) {}
+  }
+
+  function updateStatLine(fileId, data) {
+    console.log('[stat] fileId:', fileId, 'data keys:', Object.keys(data),
+      'total:', data.ocr_total_pages, 'el:', document.getElementById('stat-' + fileId));
+
+    const el = document.getElementById('stat-' + fileId);
+    if (!el) { console.warn('[stat] element not found: stat-' + fileId); return; }
+
+    const total   = data.ocr_total_pages     ?? data.total_pages ?? null;
+    const success = data.ocr_success_pages   ?? null;
+    const failed  = data.ocr_fail_pages      ?? null;
+    const done    = data.ocr_processed_pages ?? null;
+
+    if (total === null && done === null) return;
+
+    let text = total !== null
+      ? `${done ?? '?'}/${total} trang`
+      : `${done} trang`;
+
+    // luôn hiển thị success / fail khi có total
+    if (total !== null) {
+      text += `  ✓${success ?? 0}  ✗${failed ?? 0}`;
+    }
+
+    el.textContent = text;
+    el.style.display = '';
+  }
+
+  function resetStats() {}
+
+  function selectFile(id) {
+    if (!files[id]) return;
+    activeId = id;
+    document.querySelectorAll('.file-item').forEach(e => e.classList.remove('bg-purple-50'));
+    document.getElementById('fi-' + id)?.classList.add('bg-purple-50');
+    document.getElementById('docTitle').textContent = files[id].name;
+    if (files[id].status === 'done') {
+      renderMarkdown(files[id].markdown);
+    } else {
+      const msgs = {
+        pending: 'Waiting to upload…', uploading: 'Uploading file to server…',
+        processing: 'OCR in progress, please wait…',
+        paused: '⏸ Job paused. Click Resume to continue OCR.',
+        error: '⚠ An error occurred. Check the server.', cancelled: 'Processing was cancelled.',
+      };
+      showMessage(msgs[files[id].status] || '');
+    }
+  }
+
+  function renderMarkdown(md) {
+    const warning = activeId && files[activeId]?.warning;
+    document.getElementById('paneRaw').textContent = warning ? `⚠ ${warning}\n\n${md}` : md;
+    const preview = document.getElementById('previewContent');
+
+    // Bước 1: Tách math ra khỏi markdown trước khi marked xử lý
+    // marked.js sẽ escape ký tự $ và _ trong công thức → phá vỡ LaTeX
+    const mathStore = [];
+    const placeholder = (i) => `MATHPLACEHOLDER${i}ENDMATH`;
+
+    let safe = md
+      // Block math $$ ... $$ (có thể nhiều dòng)
+      .replace(/\$\$([\s\S]+?)\$\$/g, (_, inner) => {
+        mathStore.push({ display: true, tex: inner });
+        return placeholder(mathStore.length - 1);
+      })
+      // Inline math $ ... $ (không span qua newline)
+      .replace(/\$([^\n$]+?)\$/g, (_, inner) => {
+        mathStore.push({ display: false, tex: inner });
+        return placeholder(mathStore.length - 1);
+      });
+
+    // Bước 2: Chạy marked trên phần text đã bỏ math
+    const warningBanner = warning
+      ? `<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:8px 12px;margin-bottom:16px;font-size:13px;color:#d97706">⚠ ${warning}</div>`
+      : '';
+    preview.innerHTML = warningBanner + marked.parse(safe);
+
+    // Bước 3: Thay placeholder bằng KaTeX rendered HTML
+    preview.innerHTML = preview.innerHTML.replace(
+      /MATHPLACEHOLDER(\d+)ENDMATH/g,
+      (_, i) => {
+        const { display, tex } = mathStore[parseInt(i)];
+        try {
+          return katex.renderToString(tex.trim(), { displayMode: display, throwOnError: false });
+        } catch {
+          return display ? `$$${tex}$$` : `$${tex}$`;
+        }
+      }
+    );
+
+    document.getElementById('copyBtnWrap').style.display = 'flex';
+    document.getElementById('downloadBtn').style.display = '';
+  }
+
+  function showMessage(msg) {
+    document.getElementById('paneRaw').textContent = msg;
+    document.getElementById('previewContent').innerHTML = `<p class="text-gray-400 italic">${msg}</p>`;
+    document.getElementById('copyBtnWrap').style.display = 'none';
+    document.getElementById('downloadBtn').style.display = 'none';
+  }
+
+  function resetViewer() {
+    document.getElementById('docTitle').textContent = 'Markdown Output (Converted)';
+    showMessage('Upload a PDF to begin OCR processing…');
+  }
+
+  // ─── Tab switching ────────────────────────────────────────────────────
+  function switchTab(tab) {
+    currentTab = tab;
+    const A = 'flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-md bg-[#eaddff] text-purple-900 shadow-sm transition-colors';
+    const I = 'flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-md text-gray-600 hover:text-gray-900 transition-colors';
+    document.getElementById('paneRaw').style.display     = tab==='raw'     ? '' : 'none';
+    document.getElementById('panePreview').style.display = tab==='preview' ? '' : 'none';
+    document.getElementById('paneChat').style.display    = tab==='chat'    ? '' : 'none';
+    document.getElementById('tabRawBtn').className     = tab==='raw'     ? A : I;
+    document.getElementById('tabPreviewBtn').className = tab==='preview' ? A : I;
+    document.getElementById('tabChatBtn').className    = tab==='chat'    ? A : I;
+    if (tab==='chat') {
+      document.getElementById('copyBtnWrap').style.display='none';
+      setTimeout(()=>{lucide.createIcons({nodes:[document.getElementById('paneChat')]});document.getElementById('chatInp')?.focus();},30);
+    }
+  }
+
+  // ─── Actions ──────────────────────────────────────────────────────────
+  function copyToClipboard() {
+    if (!activeId || !files[activeId]?.markdown) return;
+    navigator.clipboard.writeText(files[activeId].markdown).then(() => {
+      const t = document.getElementById('copiedTooltip');
+      t.classList.add('show');
+      setTimeout(() => t.classList.remove('show'), 2000);
+    });
+  }
+
+  function downloadMd() {
+    if (!activeId || !files[activeId]?.markdown) return;
+    const blob = new Blob([files[activeId].markdown], { type: 'text/markdown' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url; a.download = files[activeId].name.replace(/\.pdf$/i, '.md');
+    a.click(); URL.revokeObjectURL(url);
+  }
+
+  function refreshActive() {
+    if (!activeId || !files[activeId]) return;
+    const { jobId, status } = files[activeId];
+    if (jobId && (status === 'processing' || status === 'uploading')) {
+      fetch(`${apiBase()}/pdf-status/${jobId}`)
+        .then(r => r.json())
+        .then(data => onStatusUpdate(activeId, jobId, data, pollers[jobId]))
+        .catch(() => {});
+    }
+  }
+
+  // ─── Job actions (pause / resume / delete) ──────────────────────────
+  function updateJobActions(id, status) {
+
+    const actionsEl = document.getElementById('actions-' + id);
+    const btnPause  = document.getElementById('btn-pause-' + id);
+    const btnResume = document.getElementById('btn-resume-' + id);
+    const btnDelete = document.getElementById('btn-delete-' + id);
+
+    if (!actionsEl) return;
+
+    const s = (files[id]?.status || status || '').toLowerCase();
+
+    // ✅ Khi job hoàn thành → ẩn toàn bộ nút
+    if (s === 'done' || s === 'completed') {
+      actionsEl.style.display = 'none';
+      return;
+    }
+
+    const show = (el, visible) => {
+      el.style.display = visible ? 'inline-flex' : 'none';
+    };
+
+    show(btnPause,  s === 'processing');
+    show(btnResume, s === 'paused' || s === 'error');
+    show(btnDelete, s === 'paused' || s === 'error');
+
+    actionsEl.style.display =
+      (btnPause.style.display !== 'none' ||
+      btnResume.style.display !== 'none' ||
+      btnDelete.style.display !== 'none')
+        ? ''
+        : 'none';
+  }
+
+  async function pauseJob(e, id) {
+    e.stopPropagation();
+    const jid = files[id]?.jobId;
+    if (!jid) return;
+    const btn = document.getElementById('btn-pause-' + id);
+    btn.disabled = true;
+    btn.innerHTML = '<i class="w-2.5 h-2.5" data-lucide="loader-2"></i> Pausing…';
+    lucide.createIcons({ nodes: [btn] });
+    try {
+      const res = await fetch(`${apiBase()}/pause-pdf/${jid}`, { method: 'POST' });
+      const data = await res.json();
+      if (res.ok) {
+        stopStatsPoller(jid);
+        // Reset btn-pause trước để updateJobActions không bị ảnh hưởng bởi disabled state
+        btn.disabled = false;
+        btn.innerHTML = '<i class="w-2.5 h-2.5" data-lucide="pause"></i> Pause';
+
+        files[id].status = 'paused';
+
+        setBadge(
+          id,
+          'paused',
+          `Paused (${data.pages_saved ?? '?'}/${(data.pages_saved ?? 0) + (data.pages_remaining ?? 0)} pages)`
+        );
+        hideProgress(id);
+        // Gọi lại updateJobActions để chắc chắn Resume/Delete hiện đúng
+        updateJobActions(id, 'paused');
+        // if (activeId === id) showMessage(`⏸ Job paused. ${data.pages_saved ?? ''} pages saved, ${data.pages_remaining ?? ''} remaining.`);
+      } else {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="w-2.5 h-2.5" data-lucide="pause"></i> Pause';
+        lucide.createIcons({ nodes: [btn] });
+        alert(`Pause failed: ${data.detail || data.message || res.status}`);
+      }
+    } catch(err) {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="w-2.5 h-2.5" data-lucide="pause"></i> Pause';
+      lucide.createIcons({ nodes: [btn] });
+      alert(`Pause error: ${err.message}`);
+    }
+  }
+
+  async function resumeJob(e, id) {
+    e.stopPropagation();
+    const jid = files[id]?.jobId;
+    if (!jid) return;
+    const btn = document.getElementById('btn-resume-' + id);
+    btn.disabled = true;
+    btn.innerHTML = '<i class="w-2.5 h-2.5" data-lucide="loader-2"></i> Resuming…';
+    lucide.createIcons({ nodes: [btn] });
+    try {
+      const res = await fetch(`${apiBase()}/resume-pdf/${jid}`, { method: 'POST' });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        btn.disabled = false;
+        btn.innerHTML = '<i class="w-2.5 h-2.5" data-lucide="play"></i> Resume';
+        lucide.createIcons({ nodes: [btn] });
+        alert(`Resume failed: ${err.detail || err.message || res.status}`);
+        return;
+      }
+
+      setBadge(id, 'processing', 'Resuming…', true);
+      startStatsPoller(id, jid);
+
+      btn.disabled = false;
+      btn.innerHTML = '<i class="w-2.5 h-2.5" data-lucide="play"></i> Resume';
+      lucide.createIcons({ nodes: [btn] });
+
+      const reader  = res.body.getReader();
+      const decoder = new TextDecoder();
+      let   buf     = '';
+      // Restore already-processed pages from previous run, keyed by pageIdx to avoid duplicates
+      const pageMap = {};
+      for (const p of (files[id].pages || [])) pageMap[p.pageIdx] = p;
+
+      // Show progress based on already-saved pages
+      const total = files[id].totalPages || null;
+      const savedCount = Object.keys(pageMap).length;
+      if (total && savedCount > 0) setProgress(id, Math.round(savedCount / total * 100));
+      else setProgress(id, 0);
+
+      const handleLine = (line) => {
+        line = line.trim(); if (!line) return;
+        let obj; try { obj = JSON.parse(line); } catch { return; }
+        const s = (obj.status || '').toLowerCase();
+
+        if (obj.response) {
+          let items = obj.response;
+          if (typeof items === 'string') { try { items = JSON.parse(items); } catch { items = []; } }
+          const pageIdx = obj.page_idx ?? Object.keys(pageMap).length;
+          pageMap[pageIdx] = { pageIdx, items }; // overwrite or add
+          const pages = Object.values(pageMap);
+          files[id].pages = pages;
+          const tot = files[id].totalPages || null;
+          const pct = tot ? Math.round(pages.length / tot * 100) : 0;
+          setProgress(id, pct);
+          if (activeId === id) { const m = pagesToMarkdown(pages); files[id].markdown = m; renderMarkdown(m); }
+        }
+
+        if (s === 'completed' || s === 'done') {
+          stopStatsPoller(jid);
+          setProgress(id, 100);
+          setTimeout(() => hideProgress(id), 600);
+          const pages = Object.values(pageMap);
+          const md = pages.length > 0 ? pagesToMarkdown(pages) : '';
+          files[id].markdown = md;
+          setBadge(id, 'done', 'OCR Complete');
+          if (activeId === id && md) renderMarkdown(md);
+          fetch(`${apiBase()}/pdf-status/${jid}`)
+            .then(r => r.json()).then(d => updateStatLine(id, d)).catch(() => {});
+        }
+
+        if (s === 'failed' || s === 'error') {
+          stopStatsPoller(jid);
+          hideProgress(id);
+          setBadge(id, 'error', 'Failed');
+          if (activeId === id) showMessage(`⚠ Resume failed: ${obj.message || obj.error || 'Unknown error'}`);
+        }
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const parts = buf.split('\n'); buf = parts.pop();
+        for (const line of parts) handleLine(line);
+      }
+      if (buf.trim()) handleLine(buf);
+
+    } catch(err) {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="w-2.5 h-2.5" data-lucide="play"></i> Resume';
+      lucide.createIcons({ nodes: [btn] });
+      alert(`Resume error: ${err.message}`);
+    }
+  }
+
+  async function deleteJob(e, id) {
+    e.stopPropagation();
+    const jid = files[id]?.jobId;
+    if (!jid) return;
+    if (!confirm(`Delete job and remove PDF from server?\n"${files[id].name}"`)) return;
+    const btn = document.getElementById('btn-delete-' + id);
+    btn.disabled = true;
+    btn.innerHTML = '<i class="w-2.5 h-2.5" data-lucide="loader-2"></i> Deleting…';
+    lucide.createIcons({ nodes: [btn] });
+    try {
+      const res = await fetch(`${apiBase()}/delete-pdf/${jid}`, { method: 'DELETE' });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.deleted) {
+        // Remove from UI entirely
+        removeFile(e, id);
+      } else {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="w-2.5 h-2.5" data-lucide="trash-2"></i> Delete';
+        lucide.createIcons({ nodes: [btn] });
+        alert(`Delete failed: ${data.detail || data.message || res.status}`);
+      }
+    } catch(err) {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="w-2.5 h-2.5" data-lucide="trash-2"></i> Delete';
+      lucide.createIcons({ nodes: [btn] });
+      alert(`Delete error: ${err.message}`);
+    }
+  }
+
+  // ─── Drag & drop ──────────────────────────────────────────────────────
+  const dz = document.getElementById('dropzone');
+  dz.addEventListener('dragover',  e => { e.preventDefault(); dz.classList.add('border-purple-400', 'bg-purple-50'); });
+  dz.addEventListener('dragleave', () => dz.classList.remove('border-purple-400', 'bg-purple-50'));
+  dz.addEventListener('drop', e => {
+    e.preventDefault();
+    dz.classList.remove('border-purple-400', 'bg-purple-50');
+    handleFiles(e.dataTransfer.files);
+  });
+  // ─── Resizable sidebar ────────────────────────────────────────────────
+  (function() {
+    const resizer  = document.getElementById('resizer');
+    const sidebar  = document.getElementById('sidebar');
+    const layout   = document.getElementById('mainLayout');
+    if (!resizer || !sidebar) return;
+
+    let dragging = false, startX = 0, startW = 0;
+
+    resizer.addEventListener('mousedown', e => {
+      dragging = true;
+      startX = e.clientX;
+      startW = sidebar.offsetWidth;
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+      // Highlight resizer
+      resizer.querySelector('div').style.background = '#a78bfa';
+      e.preventDefault();
+    });
+
+    document.addEventListener('mousemove', e => {
+      if (!dragging) return;
+      const delta = e.clientX - startX;
+      const newW  = Math.min(Math.max(startW + delta, 180), layout.offsetWidth * 0.7);
+      sidebar.style.width = newW + 'px';
+    });
+
+    document.addEventListener('mouseup', () => {
+      if (!dragging) return;
+      dragging = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      resizer.querySelector('div').style.background = '#e5e7eb';
+    });
+
+    // Touch support
+    resizer.addEventListener('touchstart', e => {
+      dragging = true;
+      startX = e.touches[0].clientX;
+      startW = sidebar.offsetWidth;
+      e.preventDefault();
+    }, { passive: false });
+
+    document.addEventListener('touchmove', e => {
+      if (!dragging) return;
+      const delta = e.touches[0].clientX - startX;
+      const newW  = Math.min(Math.max(startW + delta, 180), layout.offsetWidth * 0.7);
+      sidebar.style.width = newW + 'px';
+    });
+
+    document.addEventListener('touchend', () => { dragging = false; });
+  })();
+
+// ── CHAT AGENT ────────────────────────────────────────
+let _chatBusy=false,_chatSid=null,_toolId=0,_thinkEl=null;
+// Processing block — groups all thought+tool events for one turn
+let _procId=null,_procCount=0;
+
+function agentBase(){const el=document.getElementById('agentApiUrl');return el?el.value.replace(/\/$/,''):'http://localhost:8000';}
+const CMETA={list_documents:{label:'Listing documents',icon:'&#128203;'},search_document:{label:'Searching documents',icon:'&#128269;'},extract_field:{label:'Extracting fields',icon:'&#9881;'},verify_result:{label:'Verifying result',icon:'&#10003;'},clarify:{label:'Asking for clarification',icon:'&#128172;'}};
+function _$msgs(){return document.getElementById('chatMsgs');}
+function _cscroll(){requestAnimationFrame(()=>{const m=_$msgs();if(m)m.scrollTop=m.scrollHeight;});}
+function _agRow(inner){const d=document.createElement('div');d.className='c-agent-row';d.innerHTML='<div class="c-agent-av">&#10022;</div><div class="c-agent-text" style="width:100%;min-width:0">'+inner+'</div>';return d;}
+function _cappend(el){const m=_$msgs();if(m){m.appendChild(el);_cscroll();}return el;}
+
+// ── Thinking spinner (transient, replaces itself) ──
+function _showThink(msg){/* disabled */}
+function _updThink(msg){/* disabled */}
+function _hideThink(){if(_thinkEl){_thinkEl.remove();_thinkEl=null;}}
+
+// ── Processing block — created once per turn, accumulates thought+tools ──
+function _startProc(){
+  _procCount++;
+  _procId='proc-'+_procCount;
+  const w=_agRow(
+    '<div class="c-proc" id="'+_procId+'">'
+    +'<div class="c-proc-hd" onclick="_toggleProc(\''+_procId+'\')">'
+    +'<div class="c-proc-dot" id="'+_procId+'-dot"><span></span><span></span><span></span></div>'
+    +'<span class="c-proc-label" id="'+_procId+'-lbl">Processing...</span>'
+    +'<span class="c-proc-chev" id="'+_procId+'-chev">&#8250;</span>'
+    +'</div>'
+    +'<div class="c-proc-body hidden" id="'+_procId+'-body"></div>'
+    +'</div>'
+  );
+  _cappend(w);
+}
+function _toggleProc(id){
+  const body=document.getElementById(id+'-body');
+  const chev=document.getElementById(id+'-chev');
+  if(!body)return;
+  const isHidden=body.classList.contains('hidden');
+  body.classList.toggle('hidden',!isHidden);
+  if(chev)chev.classList.toggle('open',isHidden);
+  _cscroll();
+}
+function _procAppend(html){
+  if(!_procId)return;
+  const body=document.getElementById(_procId+'-body');
+  if(!body)return;
+  const d=document.createElement('div');d.innerHTML=html;
+  body.appendChild(d.firstElementChild||d);
+  _cscroll();
+}
+function _finishProc(stepCount){
+  if(!_procId)return;
+  const dot=document.getElementById(_procId+'-dot');
+  const lbl=document.getElementById(_procId+'-lbl');
+  if(dot)dot.className='c-proc-dot done';
+  if(lbl){lbl.textContent=stepCount+' step'+(stepCount!==1?'s':'');lbl.className='c-proc-label done';}
+  _procId=null;
+}
+
+// ── Render functions (append into proc body) ──
+let _procSteps=0;
+function _renderThought(txt){
+  _procSteps++;
+  _procAppend('<div style="font-size:12px;color:#6b7280;line-height:1.5;font-style:italic;padding:3px 0;border-bottom:1px solid #f3f4f6">'+_x(txt)+'</div>');
+}
+function _renderTool(name,input){
+  _procSteps++;
+  const id='ct-'+(++_toolId);
+  const m=CMETA[name]||{label:name,icon:'&#9881;'};
+  _procAppend(
+    '<div class="c-tool" id="'+id+'">'
+    +'<div class="c-tool-hd" onclick="var b=document.getElementById(\''+id+'-b\');var c=document.getElementById(\''+id+'-c\');b&&b.classList.toggle(\'open\');c&&c.classList.toggle(\'open\')">'
+    +'<span class="c-tool-icon">'+m.icon+'</span>'
+    +'<span class="c-tool-label">'+m.label+'</span>'
+    +'<span class="c-tool-status" id="'+id+'-s">Running...</span>'
+    +'<span class="c-tool-chev" id="'+id+'-c">&#8250;</span>'
+    +'</div>'
+    +'<div class="c-tool-body" id="'+id+'-b">'
+    +'<div style="font-size:10px;font-weight:600;letter-spacing:.8px;text-transform:uppercase;color:#9ca3af;margin-bottom:3px">Input</div>'
+    +'<div class="c-json">'+_x(JSON.stringify(input,null,2))+'</div>'
+    +'<div id="'+id+'-r"></div>'
+    +'</div>'
+    +'</div>'
+  );
+  return id;
+}
+function _updateTool(tid,name,data,ms){
+  const s=document.getElementById(tid+'-s');
+  if(s){s.textContent='Done - '+ms+'ms';s.className='c-tool-status done';}
+  const r=document.getElementById(tid+'-r');
+  if(r)r.innerHTML='<div style="font-size:10px;font-weight:600;letter-spacing:.8px;text-transform:uppercase;color:#9ca3af;margin:6px 0 3px">Result</div>'+_buildResult(name,data);
+  _cscroll();
+}
+function _buildResult(name,data){
+  if(!data)return '<span style="color:#9ca3af">no data</span>';
+  if(name==='list_documents')return(data.documents||[]).map(d=>'<div class="c-trow"><span class="c-tk">'+_x(d.id)+'</span><span class="c-tv b">'+_x(d.contract_no)+' <span style="color:#9ca3af">- '+_x(d.filename)+'</span></span></div>').join('');
+  if(name==='search_document'){const r=data.results||[];if(!r.length)return '<span style="color:#9ca3af">No results</span>';return r.map(r=>'<div class="c-trow"><span class="c-tk">'+_x(r.id)+'</span><span class="c-tv">'+_x(r.filename)+'</span></div>').join('');}
+  if(name==='extract_field')return(data.results||[]).map(er=>{if(er.error)return'<div style="color:#dc2626">'+_x(er.error)+'</div>';return(er.fields||[]).map(f=>{const mh=(f.matches||[]).map((m,i)=>'<div class="c-match"><div class="c-match-val">['+i+'] '+_x(m.value)+'</div><div class="c-match-ctx">'+_x(m.context)+'</div>'+(f.confirmed&&i===0?'<div class="c-match-ok">confirmed</div>':'')+'</div>').join('');return'<div style="margin-bottom:6px"><div style="display:flex;gap:6px;align-items:center;margin-bottom:3px"><span style="font-size:12px;font-weight:500;color:#374151">'+_x(f.field)+'</span><span style="font-size:11px;color:'+(f.confirmed?'#15803d':'#b45309')+'">'+(f.confirmed?'confirmed':(f.matches||[]).length+' matches')+'</span></div>'+mh+'</div>';}).join('');}).join('');
+  if(name==='verify_result'){const c=data.confidence!=null?(data.confidence*100).toFixed(0)+'%':'';return'<div class="c-trow"><span class="c-tk">Verified</span><span class="c-tv '+(data.verified?'g':'r')+'">'+(data.verified?'Yes':'No')+'</span></div>'+(data.value?'<div class="c-trow"><span class="c-tk">Value</span><span class="c-tv">'+_x(data.value)+'</span></div>':'')+'<div class="c-trow"><span class="c-tk">Reason</span><span class="c-tv" style="color:#6b7280">'+_x(data.reason||'')+'</span></div>'+(c?'<div class="c-trow"><span class="c-tk">Confidence</span><span class="c-tv '+(parseFloat(c)>=85?'g':'am')+'">'+c+'</span></div>':'');}
+  if(name==='clarify')return'<div class="c-trow"><span class="c-tk">Message</span><span class="c-tv">'+_x(data.message||'')+'</span></div>'+(data.questions||[]).map(q=>'<div class="c-trow"><span class="c-tk">Question</span><span class="c-tv">'+_x(q)+'</span></div>').join('');
+  return'<div class="c-json">'+_x(JSON.stringify(data,null,2))+'</div>';
+}
+function _renderAnswer(resp,ms){
+  _hideThink();
+  _finishProc(_procSteps);
+  const results=resp.results||[];const raw=resp.agent_message||'';
+  const msg=raw.replace(/\*{0,2}(?:Thought|Observation)\*{0,2}[:\s]+.*?(?=\n\n|$)/gis,'').trim();
+  if(results.length){
+    const docs=results.map(doc=>{const flds=(doc.matched_fields||[]).map(f=>'<div class="c-field"><span class="c-fk">'+_x(f.field)+'</span><span class="c-fv '+(f.color||'')+'">'+_x(f.value)+'</span></div>').join('');return'<div style="margin-bottom:8px"><div class="c-doc-name">'+_x(doc.filename)+'</div>'+flds+'</div>';}).join('');
+    _cappend(_agRow('<div class="c-answer"><div class="c-answer-hd"><span class="c-answer-lbl">Results</span><span class="c-answer-meta">'+(resp.total_matches||0)+' doc - '+ms+'ms</span></div><div class="c-answer-body">'+docs+(msg?'<div style="font-size:13.5px;color:#374151;line-height:1.65;margin-top:10px;padding-top:10px;border-top:1px solid #e9d8fd">'+_md(msg)+'</div>':'')+'</div></div>'));
+  }else if(msg){_cappend(_agRow('<div class="c-agent-text">'+_md(msg)+'</div>'));}
+  setTimeout(_cscroll,60);
+}
+function _renderClarify(resp){
+  _hideThink();
+  _finishProc(_procSteps);
+  const qs=resp.clarify_questions||[],msg=resp.agent_message||'';
+  _cappend(_agRow('<div class="c-clarify"><div class="c-clarify-lbl">Need a bit more info</div>'+(msg?'<div style="font-size:13px;color:#374151;margin-bottom:5px">'+_md(msg)+'</div>':'')+qs.map(q=>'<div class="c-clarify-q">'+_x(q)+'</div>').join('')+'</div>'));
+}
+function _renderErr(msg){
+  _hideThink();
+  _finishProc(_procSteps);
+  _cappend(_agRow('<div class="c-error">'+_x(msg)+'</div>'));
+}
+function _renderPill(){const el=document.getElementById('chatSessionPill');if(!el)return;if(!_chatSid){el.innerHTML='';return;}el.innerHTML='<div class="c-session-pill">'+_chatSid.slice(0,8)+'<span class="c-session-x" onclick="chatClearSession()">x</span></div>';}
+async function chatClearSession(){if(_chatSid){try{await fetch(agentBase()+'/session/'+_chatSid,{method:'DELETE'});}catch(e){}} _chatSid=null;_renderPill();_cappend(_agRow('<div style="font-size:13px;color:#9ca3af">Session cleared.</div>'));}
+async function chatSend(){
+  const inp=document.getElementById('chatInp');const q=(inp?.value||'').trim();if(!q||_chatBusy)return;
+  _chatBusy=true;inp.value='';chatResize(inp);
+  const btn=document.getElementById('chatSend');if(btn)btn.disabled=true;
+  const st=document.getElementById('chatStatus');if(st){st.textContent='Thinking...';st.style.color='#7c3aed';}
+  const uEl=document.createElement('div');uEl.className='c-user-bubble';uEl.textContent=q;_cappend(uEl);
+  // Start fresh processing block for this turn
+  _procSteps=0;_startProc();_showThink();
+  const openTools={};
+  try{
+    const body={query:q};if(_chatSid)body.session_id=_chatSid;
+    const lf=Object.values(typeof files!=='undefined'?files:{});if(lf.length)body.context_files=lf.map(f=>({filename:f.name,content:f.markdown||f.content||''}));
+    const res=await fetch(agentBase()+'/query/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if(!res.ok){const e=await res.json().catch(()=>({detail:'Error'}));throw new Error(e.detail||res.statusText);}
+    const reader=res.body.getReader(),dec=new TextDecoder();let buf='';
+    while(true){
+      const{done,value}=await reader.read();if(done)break;
+      buf+=dec.decode(value,{stream:true});
+      const lines=buf.split('\n');buf=lines.pop();
+      for(const line of lines){
+        if(!line.startsWith('data: '))continue;
+        let ev;try{ev=JSON.parse(line.slice(6));}catch{continue;}
+        switch(ev.type){
+          case 'session':     _chatSid=ev.session_id;_renderPill();break;
+          case 'thinking':    _updThink(ev.message||'Thinking...');break;
+          case 'thought':     _hideThink();_renderThought(ev.text);_showThink('Working on it...');break;
+          case 'tool_call':   {_hideThink();const tid=_renderTool(ev.tool,ev.input);openTools[ev.call_id]=tid;_showThink();break;}
+          case 'tool_result': {const tid=openTools[ev.call_id];if(tid)_updateTool(tid,ev.tool,ev.data,ev.duration_ms);break;}
+          case 'answer':      _hideThink();_renderAnswer(ev,ev.processing_ms||0);break;
+          case 'clarify':     _hideThink();_renderClarify(ev);break;
+          case 'error':       _renderErr(ev.message||'Unknown error');break;
+          case 'done':        _hideThink();break;
+        }
+      }
+    }
+  }catch(e){_renderErr(e.message);}
+  _hideThink();_finishProc(_procSteps);_chatBusy=false;
+  if(btn)btn.disabled=false;if(st){st.textContent='ready';st.style.color='#9ca3af';}inp?.focus();
+}
+function chatKey(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();chatSend();}}
+function chatResize(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,120)+'px';}
+function _x(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function _md(s){
+  // Escape HTML first, then render basic markdown
+  let t=_x(s);
+  t=t.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
+  t=t.replace(/\*(.+?)\*/g,'<em>$1</em>');
+  t=t.replace(/\n/g,'<br>');
+  return t;
+}
+
+</script>
+</body></html>

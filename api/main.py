@@ -14,6 +14,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 import glob
+import shutil
 import subprocess
 import tempfile
 
@@ -41,6 +42,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+MAX_PAGES     = int(os.environ.get("MAX_PDF_PAGES", "70"))
 TRITON_URL    = os.environ.get("TRITON_URL", "http://localhost:8000")
 OCR_INFER_URL = f"{TRITON_URL}/v2/models/pipeline/infer"
 REDIS_URL     = os.environ.get("REDIS_URL", "redis://localhost:6379")
@@ -138,18 +140,22 @@ def _build_summary(job_id: str, data: dict, include_results: bool = False) -> di
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
-def render_pdf_pages(pdf_bytes: bytes) -> list:
+def get_pdf_page_count(pdf_path: str) -> int:
+    try:
+        from pypdf import PdfReader
+        return len(PdfReader(pdf_path).pages)
+    except Exception:
+        return 0
+
+
+def render_pdf_pages(pdf_path: str, max_pages: int = 0) -> list:
     pages = []
     with tempfile.TemporaryDirectory() as tmpdir:
-        pdf_path   = os.path.join(tmpdir, "input.pdf")
         out_prefix = os.path.join(tmpdir, "page")
-        with open(pdf_path, "wb") as f:
-            f.write(pdf_bytes)
-        subprocess.run(
-            ["pdftoppm", "-png", "-r", str(DPI), pdf_path, out_prefix],
-            check=True,
-            capture_output=True,
-        )
+        cmd = ["pdftoppm", "-png", "-r", str(DPI), pdf_path, out_prefix]
+        if max_pages > 0:
+            cmd += ["-l", str(max_pages)]
+        subprocess.run(cmd, check=True, capture_output=True)
         for img_path in sorted(glob.glob(f"{out_prefix}-*.png")):
             with open(img_path, "rb") as f:
                 pages.append(base64.b64encode(f.read()).decode())
@@ -231,7 +237,7 @@ async def infer_image(
 
 # ─── Shared: run OCR pages and stream results ─────────────────────────────────
 
-async def _run_ocr_stream(job_id: str, file_filename: str, pages_to_process: list, prompt: str, loop):
+async def _run_ocr_stream(job_id: str, file_filename: str, pages_to_process: list, prompt: str, loop, warning: str = None):
     filename_stem = os.path.splitext(file_filename)[0]
     cancel_event: threading.Event = threading.Event()
     result_queue: asyncio.Queue   = asyncio.Queue()
@@ -277,7 +283,10 @@ async def _run_ocr_stream(job_id: str, file_filename: str, pages_to_process: lis
     n = len(pages_to_process)
 
     async def stream():
-        yield json.dumps({"job_id": job_id, "status": "processing"}, ensure_ascii=False) + "\n"
+        first = {"job_id": job_id, "status": "processing"}
+        if warning:
+            first["warning"] = warning
+        yield json.dumps(first, ensure_ascii=False) + "\n"
         for _ in range(n):
             page_result = await result_queue.get()
             if page_result is not None:
@@ -306,22 +315,35 @@ async def infer_pdf(
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are accepted")
 
-    pdf_bytes = await file.read()
-    loop      = asyncio.get_event_loop()
+    loop     = asyncio.get_event_loop()
+    job_id   = str(uuid.uuid4())
+    pdf_path = os.path.join(PDF_STORE_DIR, f"{job_id}.pdf")
+
+    def _save(src, dst_path):
+        src.seek(0)
+        with open(dst_path, "wb") as out:
+            shutil.copyfileobj(src, out, length=16 * 1024 * 1024)
+
+    await loop.run_in_executor(thread_pool, _save, file.file, pdf_path)
+
+    original_count = await loop.run_in_executor(thread_pool, get_pdf_page_count, pdf_path)
+    warning      = None
+    render_limit = 0
+    if original_count > MAX_PAGES:
+        warning      = f"PDF có {original_count} trang, chỉ xử lý {MAX_PAGES} trang đầu (giới hạn demo)"
+        render_limit = MAX_PAGES
 
     try:
-        all_pages = await loop.run_in_executor(thread_pool, render_pdf_pages, pdf_bytes)
+        all_pages = await loop.run_in_executor(thread_pool, render_pdf_pages, pdf_path, render_limit)
     except Exception as e:
+        os.remove(pdf_path)
         raise HTTPException(status_code=500, detail=f"Failed to render PDF: {e}")
 
     total = len(all_pages)
+    logger.info("[infer_pdf] original=%d rendered=%d limit=%d", original_count, total, render_limit)
     if total == 0:
+        os.remove(pdf_path)
         raise HTTPException(status_code=422, detail="PDF has no renderable pages")
-
-    job_id   = str(uuid.uuid4())
-    pdf_path = os.path.join(PDF_STORE_DIR, f"{job_id}.pdf")
-    with open(pdf_path, "wb") as f:
-        f.write(pdf_bytes)
 
     await _job_set(
         job_id,
@@ -336,7 +358,7 @@ async def infer_pdf(
         ocr_remaining_pages = total,
     )
 
-    return await _run_ocr_stream(job_id, file.filename, list(enumerate(all_pages)), prompt, loop)
+    return await _run_ocr_stream(job_id, file.filename, list(enumerate(all_pages)), prompt, loop, warning=warning)
 
 
 # ─── POST /pause-pdf/{job_id} ─────────────────────────────────────────────────
@@ -391,17 +413,15 @@ async def resume_pdf(job_id: str):
     if not pdf_path or not os.path.exists(pdf_path):
         raise HTTPException(status_code=500, detail="Stored PDF not found on disk")
 
-    loop = asyncio.get_event_loop()
-    with open(pdf_path, "rb") as f:
-        pdf_bytes = f.read()
+    loop         = asyncio.get_event_loop()
+    stored_total = int(job_data.get("total_pages", 0))
 
     try:
-        all_pages = await loop.run_in_executor(thread_pool, render_pdf_pages, pdf_bytes)
+        all_pages = await loop.run_in_executor(thread_pool, render_pdf_pages, pdf_path, stored_total)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to render PDF: {e}")
 
-    total        = len(all_pages)
-    stored_total = int(job_data.get("total_pages", 0))
+    total = len(all_pages)
     if total != stored_total:
         raise HTTPException(
             status_code=500,
