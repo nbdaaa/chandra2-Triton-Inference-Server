@@ -63,9 +63,3 @@ services:
       timeout: 5s
       retries: 3
 
-  redisinsight:
-    image: redis/redisinsight:latest
-    network_mode: host
-    restart: unless-stopped
-    depends_on:
-      - redis

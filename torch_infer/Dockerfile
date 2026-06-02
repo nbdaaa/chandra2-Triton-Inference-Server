@@ -2,7 +2,6 @@ FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
 # System libs needed by Pillow and OpenCV (via transformers vision deps)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1 \
     libglib2.0-0 \
     curl \
  && rm -rf /var/lib/apt/lists/*
