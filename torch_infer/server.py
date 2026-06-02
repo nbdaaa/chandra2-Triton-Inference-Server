@@ -113,8 +113,11 @@ def _load_model_blocking() -> None:
         MODEL_NAME,
         torch_dtype=torch.bfloat16,
         device_map="auto",
+        attn_implementation="flash_attention_2",
     )
     _model.eval()
+    logger.info("Compiling model with torch.compile …")
+    _model = torch.compile(_model, mode="reduce-overhead")
     logger.info("Model ready on %s", next(_model.parameters()).device)
 
 
