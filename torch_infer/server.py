@@ -108,27 +108,17 @@ def _load_model_blocking() -> None:
     _processor = AutoProcessor.from_pretrained(MODEL_NAME, trust_remote_code=True)
 
     logger.info("Loading model from %s", MODEL_NAME)
-    try:
-        from transformers import Qwen3VLForConditionalGeneration
-        _model = Qwen3VLForConditionalGeneration.from_pretrained(
-            MODEL_NAME,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-        )
-        logger.info("Loaded via Qwen3VLForConditionalGeneration")
-    except (ImportError, OSError, Exception) as exc:
-        logger.warning(
-            "Qwen3VLForConditionalGeneration unavailable (%s), falling back to AutoModelForCausalLM",
-            exc,
-        )
-        from transformers import AutoModelForCausalLM
-        _model = AutoModelForCausalLM.from_pretrained(
-            MODEL_NAME,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-            trust_remote_code=True,
-        )
-
+    from transformers import AutoModelForCausalLM
+    # trust_remote_code=True lets transformers read the model's auto_map in config.json
+    # and download the exact VL class from HuggingFace. Without it, AutoModelForCausalLM
+    # loads only the text backbone and generate() rejects vision kwargs
+    # (pixel_values, image_grid_thw, mm_token_type_ids).
+    _model = AutoModelForCausalLM.from_pretrained(
+        MODEL_NAME,
+        torch_dtype=torch.bfloat16,
+        device_map="auto",
+        trust_remote_code=True,
+    )
     _model.eval()
     logger.info("Model ready on %s", next(_model.parameters()).device)
 
