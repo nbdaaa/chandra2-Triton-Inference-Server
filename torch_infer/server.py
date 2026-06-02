@@ -56,15 +56,30 @@ MAX_TOKENS  = int(os.environ.get("MAX_TOKENS", "12384"))
 REDIS_URL   = os.environ.get("REDIS_URL", "redis://localhost:6379")
 SERVER_PORT = int(os.environ.get("TRITON_HTTP_PORT", "8000"))
 
-SYSTEM_PROMPT = (
-    "You are an expert document OCR and layout analysis system. "
-    "Convert the document image to structured output, preserving the original "
-    "layout and text content accurately."
-)
-DEFAULT_USER_PROMPT = (
-    "Convert this document image to markdown. "
-    "Preserve the layout, tables, math equations, and all text content exactly as it appears."
-)
+_PROMPTS_BY_MODEL = {
+    "datalab-to/chandra-ocr-2": {
+        "system": (
+            "You are an expert document OCR and layout analysis system. "
+            "Convert the document image to structured output, preserving the original "
+            "layout and text content accurately."
+        ),
+        "user": (
+            "Convert this document image to markdown. "
+            "Preserve the layout, tables, math equations, and all text content exactly as it appears."
+        ),
+    },
+    "datalab-to/surya-ocr-2": {
+        "system": (
+            "OCR this image to HTML. Each block is a div with data-label and data-bbox "
+            "(x0 y0 x1 y1, normalized 0-1000)."
+        ),
+        "user": "",
+    },
+}
+
+_prompts        = _PROMPTS_BY_MODEL.get(MODEL_NAME, _PROMPTS_BY_MODEL["datalab-to/chandra-ocr-2"])
+SYSTEM_PROMPT       = _prompts["system"]
+DEFAULT_USER_PROMPT = _prompts["user"]
 
 _model                         = None
 _processor                     = None
