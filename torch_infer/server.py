@@ -134,12 +134,15 @@ def _infer_blocking(image_b64: str, user_prompt: str, request_id: str) -> str:
         },
     ]
 
-    inputs = _processor.apply_chat_template(
-        messages,
+    # Step 1: build text with vision-token placeholders (no image processing yet)
+    text = _processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    # Step 2: tokenise text + process image together
+    inputs = _processor(
+        text=[text],
         images=[pil_image],
-        add_generation_prompt=True,
-        tokenize=True,
-        return_dict=True,
+        padding=True,
         return_tensors="pt",
     ).to(_model.device)
 
