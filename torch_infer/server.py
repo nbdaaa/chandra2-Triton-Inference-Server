@@ -43,7 +43,7 @@ import torch
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
 from PIL import Image
-from transformers import AutoProcessor, StoppingCriteria, StoppingCriteriaList
+from transformers import AutoModelForImageTextToText, AutoProcessor, StoppingCriteria, StoppingCriteriaList
 
 logging.basicConfig(
     level=logging.INFO,
@@ -105,19 +105,14 @@ def _load_model_blocking() -> None:
     global _model, _processor
 
     logger.info("Loading processor from %s", MODEL_NAME)
-    _processor = AutoProcessor.from_pretrained(MODEL_NAME, trust_remote_code=True)
+    _processor = AutoProcessor.from_pretrained(MODEL_NAME)
+    _processor.tokenizer.padding_side = "left"
 
     logger.info("Loading model from %s", MODEL_NAME)
-    from transformers import AutoModelForCausalLM
-    # trust_remote_code=True lets transformers read the model's auto_map in config.json
-    # and download the exact VL class from HuggingFace. Without it, AutoModelForCausalLM
-    # loads only the text backbone and generate() rejects vision kwargs
-    # (pixel_values, image_grid_thw, mm_token_type_ids).
-    _model = AutoModelForCausalLM.from_pretrained(
+    _model = AutoModelForImageTextToText.from_pretrained(
         MODEL_NAME,
         torch_dtype=torch.bfloat16,
         device_map="auto",
-        trust_remote_code=True,
     )
     _model.eval()
     logger.info("Model ready on %s", next(_model.parameters()).device)
@@ -133,43 +128,22 @@ def _infer_blocking(image_b64: str, user_prompt: str, request_id: str) -> str:
         {
             "role": "user",
             "content": [
-                {"type": "image", "image": pil_image},
-                {"type": "text",  "text":  user_prompt},
+                {"type": "image"},
+                {"type": "text", "text": user_prompt},
             ],
         },
     ]
 
-    # Build tokenised inputs.
-    # Use qwen-vl-utils when available (recommended for Qwen VL models);
-    # fall back to passing the PIL image directly to the processor.
-    try:
-        from qwen_vl_utils import process_vision_info
+    inputs = _processor.apply_chat_template(
+        messages,
+        images=[pil_image],
+        add_generation_prompt=True,
+        tokenize=True,
+        return_dict=True,
+        return_tensors="pt",
+    ).to(_model.device)
 
-        text_input = _processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        image_inputs, video_inputs = process_vision_info(messages)
-        inputs = _processor(
-            text=[text_input],
-            images=image_inputs or None,
-            videos=video_inputs or None,
-            padding=True,
-            return_tensors="pt",
-        )
-    except ImportError:
-        text_input = _processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        inputs = _processor(
-            text=[text_input],
-            images=[pil_image],
-            padding=True,
-            return_tensors="pt",
-        )
-
-    inputs    = {k: v.to(_model.device) for k, v in inputs.items()}
-    input_len = inputs["input_ids"].shape[1]
-
+    input_len       = inputs["input_ids"].shape[-1]
     cancel_criteria = _CancelCriteria(request_id, _redis_client)
 
     with torch.inference_mode():
@@ -183,9 +157,10 @@ def _infer_blocking(image_b64: str, user_prompt: str, request_id: str) -> str:
     if cancel_criteria.cancelled:
         raise RuntimeError("Cancelled")
 
-    new_tokens = generated_ids[0][input_len:]
     return _processor.decode(
-        new_tokens, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        generated_ids[0][input_len:],
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
     ).strip()
 
 
