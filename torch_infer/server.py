@@ -135,8 +135,9 @@ def _infer_blocking(image_b64: str, user_prompt: str, request_id: str) -> str:
     ]
 
     # Step 1: build text with vision-token placeholders (no image processing yet)
+    # enable_thinking=False: disable Qwen3 chain-of-thought to avoid <think> tokens in output
     text = _processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
+        messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
     )
     # Step 2: tokenise text + process image together
     inputs = _processor(
@@ -154,6 +155,7 @@ def _infer_blocking(image_b64: str, user_prompt: str, request_id: str) -> str:
             **inputs,
             max_new_tokens=MAX_TOKENS,
             do_sample=False,
+            eos_token_id=_processor.tokenizer.eos_token_id,
             stopping_criteria=StoppingCriteriaList([cancel_criteria]),
         )
 
