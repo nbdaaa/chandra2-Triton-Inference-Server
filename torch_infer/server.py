@@ -40,6 +40,12 @@ from io import BytesIO
 
 import redis as redis_lib
 import torch
+
+# torch.float8_e8m0fnu was introduced in PyTorch 2.6; transformers ≥4.52 references it
+# at import time even when FP8 features are not used. Patch it for PyTorch 2.5 compat.
+if not hasattr(torch, "float8_e8m0fnu"):
+    torch.float8_e8m0fnu = torch.float32
+
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
 from PIL import Image
