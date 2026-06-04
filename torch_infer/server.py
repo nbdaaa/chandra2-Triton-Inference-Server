@@ -121,6 +121,9 @@ def _load_model_blocking() -> None:
 
     logger.info("Loading processor from %s", MODEL_NAME)
     _processor = AutoProcessor.from_pretrained(MODEL_NAME)
+    if not hasattr(_processor, "tokenizer"):
+        from transformers import Qwen2VLProcessor
+        _processor = Qwen2VLProcessor.from_pretrained(MODEL_NAME)
     _processor.tokenizer.padding_side = "left"
 
     logger.info("Loading model from %s", MODEL_NAME)
